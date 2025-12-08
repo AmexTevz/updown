@@ -1,0 +1,410 @@
+"""
+Robust hardware control with automatic retry and continuous monitoring
+"""
+
+import asyncio
+import aiohttp
+import random
+import logging
+from typing import Optional
+from config import *
+
+logger = logging.getLogger(__name__)
+
+# ============================================================================
+# HARDWARE STATE TRACKING WITH CONTINUOUS MONITORING
+# ============================================================================
+
+class HardwareState:
+    def __init__(self):
+        self.bulb_1_online = True
+        self.bulb_2_online = True
+        self.strobe_online = True
+        self.fan_online = True
+        self.plug_online = True
+        self.button_1_online = True
+        self.button_2_online = True
+        self.pishock_online = True
+
+        # Continuous monitoring
+        self.monitoring_active = False
+        self.monitor_task = None
+
+hardware_state = HardwareState()
+
+# ============================================================================
+# SHELLY DEVICE CONTROL
+# ============================================================================
+
+async def shelly_control(device_id: int, command: str, endpoint: str = "light") -> bool:
+    """Control Shelly device with retry"""
+    url = f"http://{BASE_IP}{device_id}/{endpoint}/0?turn={command}"
+
+    for attempt in range(NETWORK_MAX_RETRIES):
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as response:
+                    if response.status == 200:
+                        return True
+        except Exception as e:
+            if attempt == NETWORK_MAX_RETRIES - 1:
+                logger.debug(f"Device {device_id} failed: {e}")
+
+        if attempt < NETWORK_MAX_RETRIES - 1:
+            await asyncio.sleep(NETWORK_RETRY_DELAY)
+
+    return False
+
+# ============================================================================
+# BULB CONTROLS
+# ============================================================================
+
+async def bulb_1_control(state: str) -> bool:
+    """DOWN position bulb"""
+    success = await shelly_control(BULB_1, state, "light")
+    hardware_state.bulb_1_online = success
+    return success
+
+async def bulb_2_control(state: str) -> bool:
+    """UP position bulb"""
+    success = await shelly_control(BULB_2, state, "light")
+    hardware_state.bulb_2_online = success
+    return success
+
+async def all_bulbs_off():
+    """Turn off all bulbs"""
+    await asyncio.gather(
+        bulb_1_control("off"),
+        bulb_2_control("off"),
+        return_exceptions=True
+    )
+
+async def all_bulbs_on():
+    """Turn on all bulbs - used when game ends"""
+    await asyncio.gather(
+        bulb_1_control("on"),
+        bulb_2_control("on"),
+        return_exceptions=True
+    )
+
+# ============================================================================
+# STROBE CONTROL
+# ============================================================================
+
+async def strobe_control(state: str) -> bool:
+    """Control strobe light"""
+    success = await shelly_control(STROBE, state, "relay")
+    hardware_state.strobe_online = success
+    return success
+
+# ============================================================================
+# FAN CONTROL
+# ============================================================================
+
+async def fan_control(state: str) -> bool:
+    """Control fan"""
+    success = await shelly_control(FAN, state, "relay")
+    hardware_state.fan_online = success
+    return success
+
+# ============================================================================
+# PLUG CONTROL
+# ============================================================================
+
+async def plug_control(state: str) -> bool:
+    """Control plug - game end signal"""
+    success = await shelly_control(PLUG, state, "relay")
+    hardware_state.plug_online = success
+    return success
+
+# ============================================================================
+# BUTTON CONTROLS
+# ============================================================================
+
+async def read_button(button_id: int) -> Optional[int]:
+    """Read button event count"""
+    url = f"http://{BASE_IP}{button_id}/input/0"
+
+    for attempt in range(NETWORK_MAX_RETRIES):
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        return data['inputs'][0]['event_cnt']
+        except Exception as e:
+            if attempt == NETWORK_MAX_RETRIES - 1:
+                logger.debug(f"Button {button_id} read failed: {e}")
+
+        if attempt < NETWORK_MAX_RETRIES - 1:
+            await asyncio.sleep(NETWORK_RETRY_DELAY)
+
+    return None
+
+async def check_button_press(button_id: int, last_value: Optional[int]) -> tuple[bool, Optional[int]]:
+    """
+    Check if button pressed since last check
+    Returns: (pressed, new_value)
+    """
+    current_value = await read_button(button_id)
+
+    if current_value is None:
+        if button_id == BUTTON_1:
+            hardware_state.button_1_online = False
+        else:
+            hardware_state.button_2_online = False
+        return False, last_value
+
+    if button_id == BUTTON_1:
+        hardware_state.button_1_online = True
+    else:
+        hardware_state.button_2_online = True
+
+    if last_value is None:
+        return False, current_value
+
+    if current_value > last_value:
+        logger.info(f"Button {button_id} pressed")
+        return True, current_value
+
+    return False, current_value
+
+# ============================================================================
+# PISHOCK CONTROL - SIMPLIFIED (SINGLE EMITTER)
+# ============================================================================
+
+async def send_pishock(mode: int = PISHOCK_MODE_SHOCK,
+                       intensity: Optional[int] = None,
+                       duration: Optional[int] = None) -> bool:
+    """
+    Send PiShock command
+    Default mode = 0 (shock), intensity 60-100, duration 1-3
+    """
+    if intensity is None:
+        intensity = random.randint(PISHOCK_INTENSITY_MIN, PISHOCK_INTENSITY_MAX)
+    if duration is None:
+        duration = random.randint(PISHOCK_DURATION_MIN, PISHOCK_DURATION_MAX)
+
+    api_data = {
+        "Username": API_USER,
+        "Apikey": API_KEY,
+        "Name": "updown_game",
+        "Code": EMITTER,
+        "Intensity": str(intensity),
+        "Duration": str(duration),
+        "Op": str(mode)
+    }
+
+    for attempt in range(NETWORK_MAX_RETRIES):
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    API_URL,
+                    json=api_data,
+                    timeout=aiohttp.ClientTimeout(total=10)
+                ) as response:
+                    if response.status == 200:
+                        logger.info(f"PiShock: mode={mode}, intensity={intensity}, duration={duration}")
+                        hardware_state.pishock_online = True
+                        return True
+                    logger.warning(f"PiShock returned status {response.status}")
+        except Exception as e:
+            if attempt == NETWORK_MAX_RETRIES - 1:
+                logger.error(f"PiShock failed: {e}")
+
+        if attempt < NETWORK_MAX_RETRIES - 1:
+            await asyncio.sleep(NETWORK_RETRY_DELAY)
+
+    hardware_state.pishock_online = False
+    return False
+
+async def send_vibration() -> bool:
+    """
+    Send vibration signal (used for preparation and round end)
+    """
+    return await send_pishock(mode=PISHOCK_MODE_VIBRATE, intensity=70, duration=1)
+
+# ============================================================================
+# CONTINUOUS CONNECTION MONITORING
+# ============================================================================
+
+async def monitor_hardware_connections():
+    """
+    Background task that continuously monitors and retries failed connections
+    This runs throughout the entire game and never gives up
+    """
+    logger.info("Hardware connection monitoring started")
+
+    while hardware_state.monitoring_active:
+        try:
+            # Check bulbs
+            if not hardware_state.bulb_1_online:
+                logger.debug("Retrying Bulb 1 connection...")
+                result = await shelly_control(BULB_1, "off", "light")
+                if result:
+                    hardware_state.bulb_1_online = True
+                    logger.info("✓ Bulb 1 reconnected")
+
+            if not hardware_state.bulb_2_online:
+                logger.debug("Retrying Bulb 2 connection...")
+                result = await shelly_control(BULB_2, "off", "light")
+                if result:
+                    hardware_state.bulb_2_online = True
+                    logger.info("✓ Bulb 2 reconnected")
+
+            if not hardware_state.strobe_online:
+                logger.debug("Retrying Strobe connection...")
+                result = await shelly_control(STROBE, "off", "light")
+                if result:
+                    hardware_state.strobe_online = True
+                    logger.info("✓ Strobe reconnected")
+
+            # Check buttons
+            if not hardware_state.button_1_online:
+                logger.debug("Retrying Button 1 connection...")
+                value = await read_button(BUTTON_1)
+                if value is not None:
+                    hardware_state.button_1_online = True
+                    logger.info("✓ Button 1 reconnected")
+
+            if not hardware_state.button_2_online:
+                logger.debug("Retrying Button 2 connection...")
+                value = await read_button(BUTTON_2)
+                if value is not None:
+                    hardware_state.button_2_online = True
+                    logger.info("✓ Button 2 reconnected")
+
+            # Check fan
+            if not hardware_state.fan_online:
+                logger.debug("Retrying Fan connection...")
+                result = await shelly_control(FAN, "off", "relay")
+                if result:
+                    hardware_state.fan_online = True
+                    logger.info("✓ Fan reconnected")
+
+            # Check plug
+            if not hardware_state.plug_online:
+                logger.debug("Retrying Plug connection...")
+                result = await shelly_control(PLUG, "off", "relay")
+                if result:
+                    hardware_state.plug_online = True
+                    logger.info("✓ Plug reconnected")
+
+            # Check PiShock with minimal test
+            if not hardware_state.pishock_online:
+                logger.debug("Retrying PiShock connection...")
+                # Don't actually send shock during monitoring, just mark as online
+                # Will be tested during actual use
+                hardware_state.pishock_online = True
+
+        except Exception as e:
+            logger.error(f"Error in hardware monitoring: {e}")
+
+        await asyncio.sleep(HARDWARE_MONITOR_INTERVAL)
+
+    logger.info("Hardware connection monitoring stopped")
+
+def start_hardware_monitoring():
+    """Start the hardware monitoring background task"""
+    if not hardware_state.monitoring_active:
+        hardware_state.monitoring_active = True
+        hardware_state.monitor_task = asyncio.create_task(monitor_hardware_connections())
+        logger.info("Started hardware monitoring")
+
+def stop_hardware_monitoring():
+    """Stop the hardware monitoring background task"""
+    if hardware_state.monitoring_active:
+        hardware_state.monitoring_active = False
+        if hardware_state.monitor_task:
+            hardware_state.monitor_task.cancel()
+        logger.info("Stopped hardware monitoring")
+
+# ============================================================================
+# EMERGENCY SHUTDOWN
+# ============================================================================
+
+async def emergency_shutdown():
+    """
+    Critical error - activate plug and keep all lights ON forever
+    """
+    logger.critical("EMERGENCY SHUTDOWN")
+
+    while True:
+        try:
+            await plug_control("on")
+            await all_bulbs_on()
+            await asyncio.sleep(5)
+        except Exception as e:
+            logger.error(f"Emergency shutdown error: {e}")
+            await asyncio.sleep(5)
+
+# ============================================================================
+# GAME END SEQUENCE
+# ============================================================================
+
+async def game_end_sequence():
+    """
+    Normal game end - activate plug and turn all lights ON (not flashing)
+    Keep them on indefinitely
+    """
+    logger.info("GAME END SEQUENCE")
+
+    while True:
+        try:
+            await plug_control("on")
+            await all_bulbs_on()
+            await asyncio.sleep(10)
+        except Exception as e:
+            logger.error(f"Game end sequence error: {e}")
+            await asyncio.sleep(5)
+
+# ============================================================================
+# HARDWARE TEST
+# ============================================================================
+
+async def test_all_hardware():
+    """Test all hardware"""
+    logger.info("="*60)
+    logger.info("HARDWARE TEST")
+    logger.info("="*60)
+
+    tests = [
+        ("Bulb 1 (DOWN)", lambda: bulb_1_control("on")),
+        ("Bulb 2 (UP)", lambda: bulb_2_control("on")),
+        ("Strobe", lambda: strobe_control("on")),
+        ("Fan", lambda: fan_control("on")),
+        ("Plug", lambda: plug_control("on")),
+    ]
+
+    for name, func in tests:
+        logger.info(f"Testing {name}...")
+        result = await func()
+        logger.info(f"  {'✓' if result else '✗'}")
+        await asyncio.sleep(0.5)
+        # Turn off after test
+        device = name.split()[0].lower()
+        if device == "bulb":
+            if "1" in name:
+                await bulb_1_control("off")
+            elif "2" in name:
+                await bulb_2_control("off")
+        elif device == "strobe":
+            await strobe_control("off")
+        elif device == "fan":
+            await fan_control("off")
+        elif device == "plug":
+            await plug_control("off")
+
+    logger.info("Testing Button 1...")
+    value = await read_button(BUTTON_1)
+    logger.info(f"  {'✓' if value is not None else '✗'} (count: {value})")
+
+    logger.info("Testing Button 2...")
+    value = await read_button(BUTTON_2)
+    logger.info(f"  {'✓' if value is not None else '✗'} (count: {value})")
+
+    logger.info("Testing PiShock (vibration)...")
+    result = await send_vibration()
+    logger.info(f"  {'✓' if result else '✗'}")
+
+    logger.info("="*60)
