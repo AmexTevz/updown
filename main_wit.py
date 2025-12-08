@@ -383,19 +383,98 @@ async def connect_to_devices(device_list):
 
 
 async def main():
-    found_devices = await scan()
+    """
+    Main sensor loop - runs continuously throughout the game
+    Scans for sensors, connects, and automatically reconnects when they drop
+    Periodic rescanning to catch reconnected sensors
+    Never gives up, keeps trying forever
+    """
+    logger.info("=" * 70)
+    logger.info("SENSOR MONITORING SYSTEM STARTED")
+    logger.info("Will continuously scan and reconnect throughout game")
+    logger.info("=" * 70)
 
-    if len(found_devices) == 0:
-        logger.warning("No devices found. Please make sure your sensors are powered on and in range.")
-        return
-    elif len(found_devices) < 4:
-        logger.info(f"Found {len(found_devices)} device(s). Connecting to all available devices.")
-    else:
-        logger.info("Found 4 or more devices. Connecting to the first 4.")
-        found_devices = found_devices[:4]
+    scan_count = 0
+    active_connections = {}  # Track connection tasks by address
+    last_scan_time = 0
+    RESCAN_INTERVAL = 10  # Rescan every 10 seconds
 
-    await connect_to_devices(found_devices)
+    while True:  # ← INFINITE LOOP - Never stops trying
+        try:
+            current_time = time.time()
 
+            # Time to scan (initial or periodic)
+            if current_time - last_scan_time >= RESCAN_INTERVAL:
+                scan_count += 1
+                logger.debug(f"Sensor scan #{scan_count}...")
+                last_scan_time = current_time
+
+                # Scan for Bluetooth devices
+                found_devices = await scan()
+
+                if len(found_devices) == 0:
+                    if scan_count % 6 == 0:  # Log every minute (6 scans * 10 sec)
+                        logger.warning("No devices found. Sensors may be off or out of range.")
+
+                else:
+                    # Limit to 4 devices
+                    if len(found_devices) > 4:
+                        found_devices = found_devices[:4]
+
+                    # Check each found device
+                    for device in found_devices:
+                        sensor_file = ADDRESS_TO_FILE.get(device.address)
+                        if not sensor_file:
+                            continue
+
+                        # Check if we already have a connection task for this device
+                        if device.address in active_connections:
+                            task = active_connections[device.address]
+                            # Check if task is still running
+                            if not task.done():
+                                # Still connected/connecting, skip
+                                continue
+                            else:
+                                # Task completed (disconnected), remove it
+                                logger.info(f"Previous connection to {sensor_file} ended, reconnecting...")
+                                del active_connections[device.address]
+
+                        # Start new connection task
+                        logger.info(f"Starting connection to {device.address} ({sensor_file})")
+                        sensor_device = DeviceModel(
+                            f"Sensor_{device.address}",
+                            device.address,
+                            updateData,
+                            sensor_file
+                        )
+                        task = asyncio.create_task(sensor_device.openDevice())
+                        active_connections[device.address] = task
+
+            # Clean up completed tasks
+            for address in list(active_connections.keys()):
+                if active_connections[address].done():
+                    del active_connections[address]
+
+            # Sleep briefly before next check
+            await asyncio.sleep(1)
+
+        except asyncio.CancelledError:
+            # Game is shutting down, exit gracefully
+            logger.info("Sensor system shutdown requested")
+
+            # Cancel all active connection tasks
+            for task in active_connections.values():
+                task.cancel()
+
+            break
+
+        except Exception as e:
+            # Handle any unexpected errors
+            logger.error(f"Sensor system error: {e}", exc_info=True)
+            await asyncio.sleep(5)
+            # Loop continues - never gives up
+
+    logger.info("Sensor monitoring system stopped")
 
 if __name__ == "__main__":
     asyncio.run(main())

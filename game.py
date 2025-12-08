@@ -24,9 +24,20 @@ from hardware import fan_control
 sys.path.append('.')
 from main_wit import SensorDataQueue, SensorState
 
+
 logger = logging.getLogger(__name__)
 
 
+
+def log_with_time(message: str, level="INFO"):
+    """Log message with precise timestamp"""
+    timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]  # HH:MM:SS.mmm
+    if level == "INFO":
+        logger.info(f"[{timestamp}] {message}")
+    elif level == "WARNING":
+        logger.warning(f"[{timestamp}] {message}")
+    elif level == "ERROR":
+        logger.error(f"[{timestamp}] {message}")
 # ============================================================================
 # GAME STATES
 # ============================================================================
@@ -52,6 +63,9 @@ class UpDownGame:
 
     def __init__(self):
         # Sensor system
+        self._last_continuous_shock = None
+        self._continuous_shock_count = None
+        self._continuous_shock_start = None
         self.sensor_queue = SensorDataQueue()
         self.active_board_sensor = 'w_back.txt'
 
@@ -118,7 +132,9 @@ class UpDownGame:
         self.break_duration = 0
         self.total_extension_time = 0
         self.current_extension_start = 0
+        self.violation_time_accumulated = 0
         self.fan_active = False
+        self.both_sensors_were_lost = False
 
         logger.info("=" * 60)
         logger.info("UP/DOWN TRAINING GAME - PHASE 1")
@@ -139,55 +155,68 @@ class UpDownGame:
         angles = self.sensor_queue.get_all_angles()
         current_time = time.time()
 
-        # Check primary sensor availability
+        # Get sensor states
         primary_state = self.sensor_queue.get_sensor_state('w_back.txt')
-        primary_recent = self.sensor_queue.last_update_time.get('w_back.txt', 0) > current_time - 3
-        primary_available = (primary_state == SensorState.CONNECTED and primary_recent)
-
-        # Check backup sensor availability
         backup_state = self.sensor_queue.get_sensor_state('Orientation.txt')
-        backup_recent = self.sensor_queue.last_update_time.get('Orientation.txt', 0) > current_time - 3
-        backup_available = (backup_state == SensorState.CONNECTED and backup_recent)
 
-        # ALWAYS TRY PRIMARY FIRST (even if we're currently using backup)
+        # Get last update times
+        primary_last_update = self.sensor_queue.last_update_time.get('w_back.txt', 0)
+        backup_last_update = self.sensor_queue.last_update_time.get('Orientation.txt', 0)
+
+        # Check if data is recent (within 5 seconds)
+        primary_recent = primary_last_update > current_time - 5
+        backup_recent = backup_last_update > current_time - 5
+
+        # Check if we have actual angle data
+        primary_has_data = 'w_back.txt' in angles and angles['w_back.txt'] is not None
+        backup_has_data = 'Orientation.txt' in angles and angles['Orientation.txt'] is not None
+
+        # Determine availability
+        primary_available = (
+                primary_state == SensorState.CONNECTED and
+                primary_recent and
+                primary_has_data
+        )
+
+        backup_available = (
+                backup_state == SensorState.CONNECTED and
+                backup_recent and
+                backup_has_data
+        )
+
+        # ALWAYS TRY PRIMARY FIRST
         if primary_available:
-            # Check if we need to switch back
+            # Check if we need to switch back from backup
             if self.active_board_sensor != 'w_back.txt':
                 logger.info("=" * 60)
                 logger.info("✓ PRIMARY SENSOR RECONNECTED - SWITCHING BACK")
                 logger.info("=" * 60)
                 self.active_board_sensor = 'w_back.txt'
-                try:
-                    from audio import play_audio
-                    play_audio('sensor_reconnected', 'Primary sensor reconnected')
-                except:
-                    pass
+
+                # Only play audio if we were in "both lost" state
+                if self.both_sensors_were_lost:
+                    play_sensor_issue_resolved()
+                    self.both_sensors_were_lost = False
+
             self.primary_sensor_lost_time = None
             return angles.get('w_back.txt')
-        else:
-            # Track when primary was lost
-            if self.primary_sensor_lost_time is None:
-                self.primary_sensor_lost_time = current_time
-                logger.warning("Primary sensor lost - attempting to use backup")
 
-        # Only use backup if primary is unavailable
+        # Try backup if primary unavailable
         if backup_available:
             if self.active_board_sensor != 'Orientation.txt':
                 logger.info("Switched to backup board sensor")
                 self.active_board_sensor = 'Orientation.txt'
-                try:
-                    from audio import play_audio
-                    play_audio('sensor_switched', 'Using backup sensor')
-                except:
-                    pass
+                # DON'T play audio - just switching, not recovering from both lost
+
             self.backup_sensor_lost_time = None
             return angles.get('Orientation.txt')
-        else:
-            # Track when backup was lost
-            if self.backup_sensor_lost_time is None:
-                self.backup_sensor_lost_time = current_time
 
-        # Both sensors unavailable
+        # Both sensors unavailable - this is the problem state
+        if not self.both_sensors_were_lost:
+            # First time both lost
+            self.both_sensors_were_lost = True
+            # sensor_issue audio is played in check_both_sensors_lost()
+
         return None
 
     def check_both_sensors_lost(self) -> bool:
@@ -410,15 +439,17 @@ class UpDownGame:
                 violation_triggered = True
                 logger.warning(f"Position {position.upper()} not achieved in 7 seconds - VIOLATION")
 
-                # Track violation (NEW)
+                # Track violation
                 self.current_pose_violations += 1
                 self.consecutive_violations += 1
 
-                # Play violation audio ONLY FIRST TIME in this pose (NEW)
-                if not self.violation_announced_this_pose:
-                    play_violation()
-                    self.violation_announced_this_pose = True
+                # FIXED ORDER: Shock BEFORE audio
+                await send_pishock(mode=PISHOCK_MODE_SHOCK)  # SHOCK FIRST
 
+                # Play violation audio ONLY FIRST TIME in this pose
+                if not self.violation_announced_this_pose:
+                    play_violation()  # AUDIO AFTER
+                    self.violation_announced_this_pose = True
                 # Send PiShock
                 await send_pishock(mode=PISHOCK_MODE_SHOCK)
 
@@ -563,47 +594,56 @@ class UpDownGame:
 
         # Run round loop (it will verify DOWN first)
         await self.run_round()
+
     async def run_round(self):
         """
         Main round loop - Phase 1: Simple version
         Alternates between positions until round time expires
+        Continuously monitors position achievement and maintenance
 
-        If both sensors lost: Cancel round and wait for reconnection (2 hours)
-        Continuously checks for primary sensor reconnection throughout round
+        Key mechanics:
+        - If position not achieved: shock every 5 seconds until achieved or 10 shocks
+        - If position violated after achievement: shock every 5 seconds until corrected or 10 shocks
+        - Violations don't consume round time
+        - 10 shocks = void round
         """
         # Round starts in DOWN - wait for it to be verified
-        logger.info("Waiting for initial DOWN position verification...")
+        logger.info("⏱️ Waiting for initial DOWN position verification...")
         while not self.position_achieved and self.state == GameState.ROUND:
-            # Check for sensor loss
             if self.check_both_sensors_lost():
                 await self.handle_sensor_loss_during_round()
                 return
 
-            # Check if we're in DOWN position
             if self.check_position_correct('down'):
                 self.position_achieved = True
                 self.position_start_time = time.time()
-                logger.info("Initial DOWN position verified")
+                logger.info(f"⏱️ [{self.position_start_time:.3f}] Initial DOWN position verified")
 
             await asyncio.sleep(0.1)
 
         # Generate random hold time for first position
         position_hold_target = random.uniform(POSITION_HOLD_MIN, POSITION_HOLD_MAX)
-        logger.info(f"Initial position hold time: {position_hold_target:.1f} seconds")
+        logger.info(f"🎲 Initial position hold time: {position_hold_target:.1f} seconds")
+
+        # Track time spent in violations (doesn't count toward round)
+        violation_time_accumulated = 0
 
         while self.state == GameState.ROUND:
-            # CONTINUOUSLY CHECK SENSOR STATE (triggers auto-switch-back if primary reconnects)
-            _ = self.get_board_angle()  # Don't need the value, just triggers the switching logic
+            # Continuously check sensor state
+            _ = self.get_board_angle()
 
-            # Check for sensor loss FIRST
+            # Check for sensor loss
             if self.check_both_sensors_lost():
                 await self.handle_sensor_loss_during_round()
-                return  # Exit round loop
+                return
 
-            round_elapsed = time.time() - self.round_start_time
+            # Calculate adjusted round time (excluding violation time)
+            round_elapsed = (time.time() - self.round_start_time) - violation_time_accumulated
 
-            # Check if round time expired
+            # Check if round time expired (adjusted for violations)
             if round_elapsed >= self.current_round_duration:
+                logger.info(
+                    f"Round complete: {round_elapsed:.1f}s (violations added {violation_time_accumulated:.1f}s)")
                 await self.end_round()
                 break
 
@@ -612,33 +652,153 @@ class UpDownGame:
                 await self.end_game()
                 break
 
-            # Check if current position hold time complete
+            # TWO STATES: Position achieved (holding) vs Position not achieved (waiting)
+
             if self.position_achieved:
-                position_held_time = time.time() - self.position_start_time
+                # STATE 1: Position achieved - monitor if it's maintained
+                current_time = time.time()
+                position_held_time = current_time - self.position_start_time
 
-                if position_held_time >= position_hold_target:
-                    # Hold complete - switch position
-                    logger.info(
-                        f"Hold complete ({position_held_time:.1f}s / {position_hold_target:.1f}s) - switching position")
+                # Check if position is still correct
+                if not self.check_position_correct(self.current_position):
+                    # VIOLATION - Position not maintained during hold!
+                    violation_start_time = time.time()
+                    logger.warning(
+                        f"⚠️ [{violation_start_time:.3f}] Position {self.current_position.upper()} NOT MAINTAINED - VIOLATION")
 
-                    self.current_position = 'up' if self.current_position == 'down' else 'down'
-                    await self.command_position(self.current_position, is_rapid=False)
+                    # Send first shock (BEFORE audio)
+                    await send_pishock(mode=PISHOCK_MODE_SHOCK)
+                    play_violation()
 
-                    # Wait for position to be achieved
-                    while not self.position_achieved and self.state == GameState.ROUND:
-                        # Check sensor state while waiting
-                        _ = self.get_board_angle()  # Trigger switch-back check
+                    self.position_achieved = False
+                    self.consecutive_violations += 1
 
-                        # Check for sensor loss while waiting
+                    # Track shocks during this violation period
+                    shocks_this_violation = 1
+                    last_shock_time = violation_start_time
+
+                    # Keep shocking every 5 seconds until position corrected or 10 shocks
+                    while not self.check_position_correct(self.current_position) and self.state == GameState.ROUND:
                         if self.check_both_sensors_lost():
                             await self.handle_sensor_loss_during_round()
                             return
+
+                        current_time = time.time()
+                        time_since_last_shock = current_time - last_shock_time
+
+                        # Send shock every 5 seconds
+                        if time_since_last_shock >= 5.0:
+                            shocks_this_violation += 1
+                            self.consecutive_violations += 1
+
+                            logger.warning(f"⚠️ Position still not maintained - Shock #{shocks_this_violation}")
+                            await send_pishock(mode=PISHOCK_MODE_SHOCK)
+                            last_shock_time = current_time
+
+                            # Check for 10-shock void condition
+                            if shocks_this_violation >= MAX_PISHOCK_CYCLES:
+                                logger.error(f"10 shocks delivered without correction - VOIDING ROUND")
+                                play_ten_in_row()
+                                await self.void_round()
+                                return
+
                         await asyncio.sleep(0.1)
 
-                    # Position achieved - monitor task has set position_start_time
+                    # Position corrected - calculate violation time
+                    violation_end_time = time.time()
+                    violation_duration = violation_end_time - violation_start_time
+                    violation_time_accumulated += violation_duration
+
+                    # Reset timer for this position
+                    self.position_achieved = True
+                    self.position_start_time = time.time()
+                    self.consecutive_violations = 0  # Reset on success
+
+                    logger.info(
+                        f"✓ [{self.position_start_time:.3f}] Position {self.current_position.upper()} re-achieved")
+                    logger.info(
+                        f"   Violation lasted: {violation_duration:.1f}s (total violations: {violation_time_accumulated:.1f}s)")
+                    logger.info(f"   Hold timer reset - must hold for {position_hold_target:.1f}s from now")
+
+                    await asyncio.sleep(0.1)
+                    continue
+
+                # Check if hold time complete
+                if position_held_time >= position_hold_target:
+                    # Hold complete - switch position
+                    logger.info(
+                        f"⏱️ [{current_time:.3f}] Hold complete! Held for {position_held_time:.1f}s (target: {position_hold_target:.1f}s)")
+                    logger.info(f"    Switching from {self.current_position.upper()} to opposite position")
+
+                    self.current_position = 'up' if self.current_position == 'down' else 'down'
+
+                    switch_time = time.time()
+                    logger.info(f"⏱️ [{switch_time:.3f}] Commanding {self.current_position.upper()}")
+                    await self.command_position(self.current_position, is_rapid=False)
+
+                    # STATE CHANGE: Now waiting for achievement
+                    # Fall through to next iteration where position_achieved is False
+
+            else:
+                # STATE 2: Position not yet achieved - waiting and shocking if taking too long
+                current_time = time.time()
+                time_waiting = current_time - self.position_command_start
+
+                # Check if position is now achieved
+                if self.check_position_correct(self.current_position):
+                    # Position achieved!
+                    self.position_achieved = True
+                    self.position_start_time = time.time()
+                    self.consecutive_violations = 0  # Reset on achievement
+
+                    achievement_time = self.position_start_time
+                    logger.info(f"⏱️ [{achievement_time:.3f}] {self.current_position.upper()} achieved!")
+                    logger.info(f"    Took {time_waiting:.1f}s to achieve")
+
                     # Generate new random hold time
                     position_hold_target = random.uniform(POSITION_HOLD_MIN, POSITION_HOLD_MAX)
-                    logger.info(f"New position hold time: {position_hold_target:.1f} seconds")
+                    logger.info(f"🎲 New position hold time: {position_hold_target:.1f} seconds")
+
+                    await asyncio.sleep(0.1)
+                    continue
+
+                # Position still not achieved - check if we need to shock
+                # Initial 7-second violation is handled by monitor_position_achievement()
+                # But we need to CONTINUE shocking every 5 seconds after that
+
+                if time_waiting > 7.0:
+                    # Beyond initial violation time - need continuous shocking
+                    # Check when we last shocked
+                    if not hasattr(self, '_continuous_shock_start'):
+                        # First time entering continuous shock mode
+                        self._continuous_shock_start = current_time
+                        self._continuous_shock_count = 1  # monitor_position_achievement already sent first shock
+                        self._last_continuous_shock = current_time - 2  # Allow next shock in 3 seconds
+
+                    time_since_last_shock = current_time - self._last_continuous_shock
+
+                    if time_since_last_shock >= 5.0:
+                        self._continuous_shock_count += 1
+                        self.consecutive_violations += 1
+
+                        logger.warning(
+                            f"⚠️ Position {self.current_position.upper()} still not achieved - Continuous shock #{self._continuous_shock_count}")
+                        await send_pishock(mode=PISHOCK_MODE_SHOCK)
+                        self._last_continuous_shock = current_time
+
+                        # Check for 10-shock void condition
+                        if self._continuous_shock_count >= MAX_PISHOCK_CYCLES:
+                            logger.error(f"10 shocks delivered, position never achieved - VOIDING ROUND")
+                            play_ten_in_row()
+                            await self.void_round()
+                            return
+                else:
+                    # Still within initial 7-second window
+                    # Clear any continuous shock tracking
+                    if hasattr(self, '_continuous_shock_start'):
+                        delattr(self, '_continuous_shock_start')
+                        delattr(self, '_continuous_shock_count')
+                        delattr(self, '_last_continuous_shock')
 
             await asyncio.sleep(0.1)
 
