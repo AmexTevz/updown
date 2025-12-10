@@ -173,56 +173,54 @@ async def check_button_press(button_id: int, last_value: Optional[int]) -> tuple
 # PISHOCK CONTROL - SIMPLIFIED (SINGLE EMITTER)
 # ============================================================================
 
-async def send_pishock(mode: int = PISHOCK_MODE_SHOCK,
-                       intensity: Optional[int] = None,
-                       duration: Optional[int] = None) -> bool:
+async def send_pishock(mode: str = "shock", intensity: int = 30, duration: int = 1):
     """
-    Send PiShock command
-    Default mode = 0 (shock), intensity 60-100, duration 1-3
+    Send PiShock command (shock or vibrate)
+    Uses requests library to avoid SSL verification issues
     """
-    if intensity is None:
-        intensity = random.randint(PISHOCK_INTENSITY_MIN, PISHOCK_INTENSITY_MAX)
-    if duration is None:
-        duration = random.randint(PISHOCK_DURATION_MIN, PISHOCK_DURATION_MAX)
+    try:
+        # PiShock API configuration
+        api_url = "https://do.pishock.com/api/apioperate"
 
-    api_data = {
-        "Username": API_USER,
-        "Apikey": API_KEY,
-        "Name": "updown_game",
-        "Code": EMITTER,
-        "Intensity": str(intensity),
-        "Duration": str(duration),
-        "Op": str(mode)
-    }
+        # Mode mapping: "shock" -> Op 0, "vibrate" -> Op 1
+        op_code = "0" if mode == "shock" else "1"
 
-    for attempt in range(NETWORK_MAX_RETRIES):
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    API_URL,
-                    json=api_data,
-                    timeout=aiohttp.ClientTimeout(total=10)
-                ) as response:
-                    if response.status == 200:
-                        logger.info(f"PiShock: mode={mode}, intensity={intensity}, duration={duration}")
-                        hardware_state.pishock_online = True
-                        return True
-                    logger.warning(f"PiShock returned status {response.status}")
-        except Exception as e:
-            if attempt == NETWORK_MAX_RETRIES - 1:
-                logger.error(f"PiShock failed: {e}")
+        api_data = {
+            "Username": PISHOCK_USER,
+            "Apikey": PISHOCK_API_KEY,
+            "Name": "UpDownGame",
+            "Code": PISHOCK_EMITTER_1,
+            "Intensity": str(intensity),
+            "Duration": str(duration),
+            "Op": op_code
+        }
 
-        if attempt < NETWORK_MAX_RETRIES - 1:
-            await asyncio.sleep(NETWORK_RETRY_DELAY)
+        # Run requests.post in thread pool to avoid blocking
+        def _send_request():
+            import requests
+            import json
+            response = requests.post(
+                api_url,
+                data=json.dumps(api_data),
+                headers={"Content-type": "application/json"},
+                timeout=5
+            )
+            return response.status_code, response.text
 
-    hardware_state.pishock_online = False
-    return False
+        # Execute in thread pool
+        status_code, response_text = await asyncio.to_thread(_send_request)
 
-async def send_vibration() -> bool:
-    """
-    Send vibration signal (used for preparation and round end)
-    """
-    return await send_pishock(mode=PISHOCK_MODE_VIBRATE, intensity=70, duration=1)
+        if status_code == 200:
+            logger.info(f"✓ PiShock {mode} sent successfully (Status: {status_code})")  # ← ADD THIS
+            logger.debug(f"  Response: {response_text}")
+        else:
+            logger.warning(f"⚠️ PiShock returned status {status_code}: {response_text}")
+
+    except Exception as e:
+        logger.error(f"❌ PiShock failed: {e}")
+async def send_vibration(intensity: int = 30, duration: int = 1):
+    """Send vibration via PiShock"""
+    await send_pishock(mode=PISHOCK_MODE_VIBRATE, intensity=intensity, duration=duration)
 
 # ============================================================================
 # CONTINUOUS CONNECTION MONITORING

@@ -319,7 +319,6 @@ class DeviceModel:
 
 def updateData(DeviceModel, sensor_file=None):
     if not sensor_file:
-        logger.error("Sensor file not found")
         return
 
     try:
@@ -343,10 +342,8 @@ def updateData(DeviceModel, sensor_file=None):
 
 
 async def scan():
-    logger.info("Searching for Bluetooth devices...")
     try:
         devices = await bleak.BleakScanner.discover()
-        logger.info("Search ended")
         found_devices = []
         for d in devices:
             if d.name is not None and "WT" in d.name:
@@ -358,7 +355,7 @@ async def scan():
                 logger.info(f"Device: {d.name}, Address: {d.address}, UUIDs: {uuids}")
                 found_devices.append(d)
         if len(found_devices) == 0:
-            logger.warning("No devices found in this search!")
+            pass
         return found_devices
     except Exception as ex:
         logger.error(f"Bluetooth search failed to start: {ex}")
@@ -414,8 +411,7 @@ async def main():
 
                 if len(found_devices) == 0:
                     if scan_count % 6 == 0:  # Log every minute (6 scans * 10 sec)
-                        logger.warning("No devices found. Sensors may be off or out of range.")
-
+                        pass
                 else:
                     # Limit to 4 devices
                     if len(found_devices) > 4:

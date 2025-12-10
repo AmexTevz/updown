@@ -19,20 +19,22 @@ BASE_IP = "192.168.1."
 # ============================================================================
 # PISHOCK API - UPDATED WORKING CREDENTIALS
 # ============================================================================
-API_KEY = "10d3642a-4faa-4d32-b7d4-0adb4f78adb9"
-API_USER = "tevzuss"
+PISHOCK_API_KEY = "10d3642a-4faa-4d32-b7d4-0adb4f78adb9"
+PISHOCK_USER = "tevzuss"
 API_URL = "https://do.pishock.com/api/apioperate"
 
-EMITTER = "34C8335871E"  # Single emitter only
+PISHOCK_EMITTER_1 = "34C8335871E"
 
 # Mode 0 = shock, Mode 1 = vibrate
-PISHOCK_MODE_SHOCK = 0
-PISHOCK_MODE_VIBRATE = 1
+PISHOCK_MODE_SHOCK = "shock"
+PISHOCK_MODE_VIBRATE = "vibrate"
 PISHOCK_INTENSITY_MIN = 60
 PISHOCK_INTENSITY_MAX = 100
 PISHOCK_DURATION_MIN = 1
 PISHOCK_DURATION_MAX = 3
 MAX_PISHOCK_CYCLES = 10  # 10 consecutive violations = void round
+
+
 
 
 # ============================================================================
@@ -46,8 +48,8 @@ TRAINING_TIME_MAX = 240 * 60
 ROUND_DURATION_MIN = 3 * 60
 ROUND_DURATION_MAX = 6 * 60
 
-BREAK_EXTENSION_CHANCE = 0.5                    # 50% chance of approval
-TOTAL_EXTENSION_TIME_ALLOWED = 5 * 3600        # 5 hours total pool
+BREAK_EXTENSION_CHANCE = 1.0                    # 50% chance of approval
+TOTAL_EXTENSION_TIME_ALLOWED = 4 * 3600        # 5 hours total pool
 EXTENSION_REQUEST_COOLDOWN = 15                 # 15 seconds between requests
 EXTENSION_FAN_ACTIVATION_MIN = 15 * 60          # 15 minutes
 EXTENSION_FAN_ACTIVATION_MAX = 25 * 60
@@ -55,7 +57,7 @@ EXTENSION_FAN_ACTIVATION_MAX = 25 * 60
 POSITION_HOLD_MIN = 3
 POSITION_HOLD_MAX = 15
 
-PREPARATION_WINDOW = 15  # Strobe + audio, 15 sec before round
+PREPARATION_WINDOW = 20  # Strobe + audio, 15 sec before round
 WARNING_PHASE = 10       # (not used now since prep = warning)
 
 TRANSITION_TIME_NORMAL = 7
@@ -79,10 +81,18 @@ RAPID_DURATION_MIN = 2 * 60
 RAPID_DURATION_MAX = 4 * 60
 RAPID_SUSPENSE_WAIT = 3 * 60
 
+BREAK_DURATION_MIN = 120  # 2 minutes
+BREAK_DURATION_MAX = 240  # 4 minutes
+
 
 # Pre-game wait time (after button confirmation)
-PREGAME_WAIT_MIN = 2 * 60  # 2 minutes (normal)
-PREGAME_WAIT_MAX = 4 * 60  # 4 minutes (normal)
+# PREGAME_WAIT_MIN = 2 * 60  # 2 minutes (normal)
+# PREGAME_WAIT_MAX = 4 * 60  # 4 minutes (normal)
+
+PREGAME_WAIT_MIN = 10
+PREGAME_WAIT_MAX = 15
+
+
 PREGAME_WAIT_MIN_TESTING = 5   # 5 seconds (testing)
 PREGAME_WAIT_MAX_TESTING = 10  # 10 seconds (testing)
 # ============================================================================
@@ -121,7 +131,39 @@ HARDWARE_MONITOR_INTERVAL = 10  # Check every 10 seconds for reconnection
 # ============================================================================
 # TESTING MODE
 # ============================================================================
-TESTING_MODE = True
+
+# ============================================================================
+# LEVEL SYSTEM (Phase 6 - Simplified)
+# ============================================================================
+
+
+LEVEL_CONFIG = {
+    'easy': {
+        'round_duration': (180, 300),      # 3-5 minutes
+        'transition_time': (8, 12),        # 8-12 seconds random per command
+        'hold_time_up': (3, 9),            # 3-9 seconds
+        'hold_time_down': (6, 18),         # 6-18 seconds
+        'violation_limit': 6               # Less than 6 to pass
+    },
+    'medium': {
+        'round_duration': (240, 360),      # 4-6 minutes
+        'transition_time': (6, 10),        # 6-10 seconds
+        'hold_time_up': (6, 15),           # 6-15 seconds
+        'hold_time_down': (5, 12),         # 5-12 seconds
+        'violation_limit': 4               # Less than 4 to pass
+    },
+    'hard': {
+        'round_duration': (300, 420),      # 5-7 minutes
+        'transition_time': (5, 8),         # 5-8 seconds
+        'hold_time_up': (10, 20),          # 10-20 seconds
+        'hold_time_down': (3, 10),         # 3-10 seconds
+        'violation_limit': 2               # Less than 2 to pass
+    }
+}
+
+# Cycle completion bonus (awarded only when all three levels passed)
+CYCLE_COMPLETION_BONUS = 20 * 60  # 20 minutes
+TESTING_MODE = False
 
 if TESTING_MODE:
     print("="*60)
@@ -137,6 +179,6 @@ if TESTING_MODE:
     BREAK_DURATION_MAX = 30
     POSITION_HOLD_MIN = 8
     POSITION_HOLD_MAX = 20
-    PREPARATION_WINDOW = 15
+    PREPARATION_WINDOW = 20
     VOID_BREAK_DURATION = 30
     SENSOR_PATIENCE_TIME = 2 * 60  # 2 minutes in testing mode

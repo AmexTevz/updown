@@ -87,12 +87,17 @@ class UpDownGame:
         # Round tracking
         self.current_round_duration = 0
         self.round_start_time = 0
+        self.current_level = 'easy'  # Current difficulty level
+        self.round_violations = 0
+        self._last_round_passed = None# Violations this round
         self.current_position = 'down'
         self.position_hold_time = 0
         self.position_start_time = 0
         self.position_command_start = 0
         self.position_achieved = False
         self.position_bulb_task = None
+        self.position_transition_deadline = 0  # Grace period deadline
+        self.last_countdown_second = 0
 
         # Break tracking
         self.break_start_time = 0
@@ -123,6 +128,8 @@ class UpDownGame:
         self.last_extension_request_time = 0  # When last request was made
         self.extension_active = False  # Is extension currently active
         self.extension_start_time = 0  # When current extension started
+        self.extension_qualified = False  # Is subject qualified for extension?
+        self.void_occurred = False
         self.extension_fan_triggered = False  # Has fan been activated this extension
         self.extension_fan_trigger_time = 0  # When fan should activate
         self._last_button_1_value = 0  # For button edge detection
@@ -135,6 +142,7 @@ class UpDownGame:
         self.violation_time_accumulated = 0
         self.fan_active = False
         self.both_sensors_were_lost = False
+
 
         logger.info("=" * 60)
         logger.info("UP/DOWN TRAINING GAME - PHASE 1")
@@ -367,10 +375,20 @@ class UpDownGame:
 
         # Start monitoring position achievement
         logger.info("→ Starting position monitoring")
-        monitor_task = asyncio.create_task(
-            self.monitor_position_achievement(position, bulb_control, is_rapid)
-        )
+        config = self.get_level_config()
+        if not is_rapid:
+            transition_time = random.uniform(*config['transition_time'])
+        else:
+            transition_time = TRANSITION_TIME_RAPID
+        # Store grace period deadline
+        self.position_transition_deadline = time.time() + transition_time
+        logger.info(
+            f"→ Transition time: {transition_time:.1f}s (grace period until {self.position_transition_deadline:.3f})")
 
+        # Start monitoring for achievement
+        monitor_task = asyncio.create_task(
+            self.monitor_position_achievement(position, bulb_control, is_rapid, transition_time)
+        )
         logger.info(f"✓ Position command complete: {position.upper()}")
         logger.info("")
 
@@ -378,26 +396,58 @@ class UpDownGame:
         """
         Handle round void due to 10 consecutive violations
         - No time credit
-        - Forced 3-minute break
+        - Forced 3-minute break with white noise
         - Reset violation counters
         """
+        self.void_occurred = True
+        self.round_violations = 999
         self.state = GameState.BREAK
-        logger.warning("Round voided - entering forced break")
+
+        logger.warning("=" * 60)
+        logger.warning("ROUND VOIDED - 10 CONSECUTIVE VIOLATIONS")
+        logger.warning("=" * 60)
+        logger.warning(f"Entering forced break: {VOID_BREAK_DURATION / 60:.1f} minutes")
 
         # Turn off all lights
         await all_bulbs_off()
 
-        # Forced break (3 minutes)
-        await asyncio.sleep(VOID_BREAK_DURATION)
+        # Start white noise during void break
+        start_white_noise()
 
-        # Reset counters
+        # Forced break (3 minutes)
+        void_break_start = time.time()
+        while time.time() - void_break_start < VOID_BREAK_DURATION:
+            # Check for sensor loss during void break
+            if self.check_both_sensors_lost():
+                await self.handle_sensor_loss_during_round()
+                return
+
+            # Log progress every 30 seconds
+            elapsed = time.time() - void_break_start
+            if int(elapsed) % 30 == 0 and elapsed > 0:
+                remaining = (VOID_BREAK_DURATION - elapsed) / 60
+                logger.info(f"Void break: {remaining:.1f} minutes remaining")
+
+            await asyncio.sleep(1)
+
+        # Stop white noise
+        stop_white_noise()
+
+        logger.info("Void break complete - resuming training")
+
         self.consecutive_violations = 0
         self.current_pose_violations = 0
+        self.round_violations = 0  # Also reset round violations
+
+        # Reset continuous shock tracking
+        self._continuous_shock_start = None
+        self._continuous_shock_count = None
+        self._last_continuous_shock = None
 
         # Resume to preparation
         await self.enter_preparation()
+    async def monitor_position_achievement(self, position: str, bulb_control, is_rapid: bool, transition_time: float = 7.0):
 
-    async def monitor_position_achievement(self, position: str, bulb_control, is_rapid: bool):
         """
         Monitor for position achievement and handle bulb behavior
         NOW ALSO: Track violations and play audio appropriately
@@ -435,23 +485,24 @@ class UpDownGame:
                 break
 
             # 7-second violation check (only for normal rounds)
-            if not is_rapid and elapsed >= TRANSITION_TIME_NORMAL and not violation_triggered:
+            if not is_rapid and elapsed >= transition_time and not violation_triggered:
                 violation_triggered = True
                 logger.warning(f"Position {position.upper()} not achieved in 7 seconds - VIOLATION")
 
                 # Track violation
                 self.current_pose_violations += 1
                 self.consecutive_violations += 1
+                self.round_violations += 1
 
                 # FIXED ORDER: Shock BEFORE audio
-                await send_pishock(mode=PISHOCK_MODE_SHOCK)  # SHOCK FIRST
+                asyncio.create_task(send_pishock(mode=PISHOCK_MODE_SHOCK))
 
                 # Play violation audio ONLY FIRST TIME in this pose
                 if not self.violation_announced_this_pose:
-                    play_violation()  # AUDIO AFTER
+                    play_violation()
                     self.violation_announced_this_pose = True
                 # Send PiShock
-                await send_pishock(mode=PISHOCK_MODE_SHOCK)
+
 
                 # Check for 10-in-a-row void condition (NEW)
                 if self.consecutive_violations >= MAX_PISHOCK_CYCLES:
@@ -460,11 +511,12 @@ class UpDownGame:
                     await self.void_round()
                     return
 
-            # 8-second safety timeout (turn off bulb)
-            if elapsed >= BULB_SAFETY_TIMEOUT:
+            # Safety timeout: transition_time + 1 second
+            safety_timeout = transition_time + 1.0
+            if elapsed >= safety_timeout:
                 if not is_rapid:
                     await bulb_control("off")
-                    logger.info("Bulb turned OFF (8-second safety timeout)")
+                    logger.info(f"Bulb turned OFF (safety timeout at {safety_timeout:.1f}s)")
                 break
 
             await asyncio.sleep(0.033)  # 30Hz check
@@ -510,6 +562,68 @@ class UpDownGame:
         """Check if game deadline has passed"""
         return self.time_until_deadline <= 0
 
+    def get_level_config(self):
+        """Get configuration for current level"""
+        return LEVEL_CONFIG[self.current_level]
+
+    def apply_round_result(self, passed: bool):
+        """
+        Apply round completion results - simplified version
+        - Credits round time always
+        - Awards 20 min bonus only on Hard pass
+        - No penalties to training time
+        """
+        self._last_round_passed = passed
+        config = self.get_level_config()
+
+        # ALWAYS credit round time (unless voided)
+        if not self.void_occurred:
+            self.completed_training_time += self.current_round_duration
+            logger.info(f"Round time credited: {self.current_round_duration / 60:.1f} min")
+
+        if passed:
+            logger.info(f"✓ ROUND PASSED!")
+            logger.info(f"  Violations: {self.round_violations}/{config['violation_limit']}")
+
+            # Advance level
+            if self.current_level == 'easy':
+                self.current_level = 'medium'
+                logger.info("  → Next level: MEDIUM")
+                self.extension_qualified = False
+
+            elif self.current_level == 'medium':
+                self.current_level = 'hard'
+                logger.info("  → Next level: HARD")
+                self.extension_qualified = False
+
+            elif self.current_level == 'hard':
+                # CYCLE COMPLETE! Award 20 min bonus
+                self.completed_training_time += CYCLE_COMPLETION_BONUS
+                logger.info(f"  ★ CYCLE COMPLETE! Bonus: {CYCLE_COMPLETION_BONUS / 60} min")
+                self.current_level = 'easy'
+                logger.info("  → Next level: EASY (new cycle)")
+                self.extension_qualified = True  # Hard passed - qualify for extension
+
+        else:  # Failed
+            logger.warning(f"✗ ROUND FAILED!")
+            logger.warning(f"  Violations: {self.round_violations} (limit: {config['violation_limit']})")
+            logger.warning(f"  Restarting from EASY level")
+
+            # Back to Easy
+            self.current_level = 'easy'
+
+            # Qualify for extension (failed round)
+            if not self.void_occurred:
+                self.extension_qualified = True
+                logger.info("  Break extension qualified (round failed)")
+            else:
+                self.extension_qualified = False
+                logger.warning("  NO extension allowed (round voided)")
+
+        # Reset round violation counter
+        self.round_violations = 0
+        self.void_occurred = False
+
     # ========================================================================
     # STATE MACHINE
     # ========================================================================
@@ -532,17 +646,17 @@ class UpDownGame:
 
     async def enter_preparation(self):
         """
-        Enter 15-second preparation phase
+        Enter 20-second preparation phase
         - Play audio announcement
         - Turn on strobe light ONLY
         - Send vibration
         - Monitor buttons
         """
         self.state = GameState.PREPARATION
-        logger.info("Entering preparation phase (15 seconds)")
+        logger.info("Entering preparation phase (20 seconds)")
 
-        # Audio feedback
-        play_round_starting()
+        # Audio feedback - play and get duration
+        prep_duration = play_round_starting()
 
         # Turn on ONLY strobe (all bulbs off)
         await all_bulbs_off()
@@ -551,15 +665,39 @@ class UpDownGame:
         # Send vibration
         await send_vibration()
 
-        # Monitor for 15 seconds (check buttons)
+        # Wait for preparation audio to finish before playing level audio
+        if prep_duration > 0:
+            await asyncio.sleep(prep_duration + 0.3)  # Add 0.3s buffer
+
+        # Play level announcement
+        if self.current_level == 'easy':
+            play_easy_level()
+        elif self.current_level == 'medium':
+            play_medium_level()
+        elif self.current_level == 'hard':
+            play_hard_level()
+
+        # If qualified for extension, play availability audio
+        if self.extension_qualified:
+            await asyncio.sleep(1.0)  # Brief pause between level and extension audio
+            play_extension_available()
+
+        # Monitor for 20 seconds (check buttons)
         prep_start = time.time()
         while time.time() - prep_start < PREPARATION_WINDOW:
-            # Check Button_1 (extension request) - Phase 1: just log it
+            # Check Button_1 (extension request)
             pressed_1, self.last_button_1_value = await check_button_press(
                 BUTTON_1, self.last_button_1_value
             )
             if pressed_1:
-                logger.info("Button 1 pressed during prep (extension - not implemented yet)")
+                if self.extension_qualified:
+                    logger.info("Button 1 pressed - Extension granted!")
+                    # Grant extension immediately
+                    await self.start_extension()
+                    # After extension ends, we'll return to prep to finish the window
+                else:
+                    # Not qualified - silent ignore
+                    logger.debug("Button 1 pressed but not qualified for extension (ignored)")
 
             # Check Button_2 (rapid training) - Phase 1: just log it
             pressed_2, self.last_button_2_value = await check_button_press(
@@ -576,15 +714,30 @@ class UpDownGame:
         # Start round
         await self.start_round()
 
+        # Preparation complete - turn off strobe
+        await strobe_control("off")
+
+        # Start round
+        await self.start_round()
+
     async def start_round(self):
         """Start a training round"""
         self.state = GameState.ROUND
-        self.current_round_duration = random.randint(ROUND_DURATION_MIN, ROUND_DURATION_MAX)
+        config = self.get_level_config()
+        self.current_round_duration = random.randint(*config['round_duration'])
         self.round_start_time = time.time()
 
         logger.info("=" * 60)
         logger.info(f"ROUND STARTED - Duration: {self.current_round_duration} seconds")
         logger.info("=" * 60)
+
+        # Reset all violation tracking for fresh round
+        self.consecutive_violations = 0
+        self.current_pose_violations = 0
+        self.round_violations = 0
+        self._continuous_shock_start = None
+        self._continuous_shock_count = None
+        self._last_continuous_shock = None
 
         # Round starts with subject expected in DOWN position
         self.current_position = 'down'
@@ -622,7 +775,12 @@ class UpDownGame:
             await asyncio.sleep(0.1)
 
         # Generate random hold time for first position
-        position_hold_target = random.uniform(POSITION_HOLD_MIN, POSITION_HOLD_MAX)
+        # Get hold time based on position and level
+        config = self.get_level_config()
+        if self.current_position == 'up':
+            position_hold_target = random.uniform(*config['hold_time_up'])
+        else:  # down
+            position_hold_target = random.uniform(*config['hold_time_down'])
         logger.info(f"🎲 Initial position hold time: {position_hold_target:.1f} seconds")
 
         # Track time spent in violations (doesn't count toward round)
@@ -658,20 +816,56 @@ class UpDownGame:
                 # STATE 1: Position achieved - monitor if it's maintained
                 current_time = time.time()
                 position_held_time = current_time - self.position_start_time
+                hold_remaining = position_hold_target - position_held_time
+                current_second = int(current_time)
+                if current_second != self.last_countdown_second and hold_remaining > 0:
+                    logger.info(f"⏱️ Hold countdown: {int(hold_remaining)} seconds")
+                    self.last_countdown_second = current_second
 
                 # Check if position is still correct
                 if not self.check_position_correct(self.current_position):
-                    # VIOLATION - Position not maintained during hold!
+                    current_time = time.time()
+
+                    # Check if still in grace period
+                    if current_time < self.position_transition_deadline:
+                        # GRACE PERIOD - No punishment yet
+                        logger.warning(
+                            f"⚠️ Position {self.current_position.upper()} lost during grace period - waiting for correction")
+
+                        # Wait for correction (no shocking during grace period)
+                        while not self.check_position_correct(self.current_position) and self.state == GameState.ROUND:
+                            if self.check_both_sensors_lost():
+                                await self.handle_sensor_loss_during_round()
+                                return
+
+                            # Check if grace period expired
+                            if time.time() >= self.position_transition_deadline:
+                                logger.error("⚠️ Grace period EXPIRED - starting punishment")
+                                break
+
+                            await asyncio.sleep(0.1)
+
+                        # Check result
+                        if self.check_position_correct(self.current_position):
+                            # Corrected within grace period!
+                            logger.info(f"✓ Position corrected within grace period")
+                            self.position_start_time = time.time()  # Reset hold timer
+                            await asyncio.sleep(0.1)
+                            continue
+                        # else: grace period expired, fall through to punishment
+
+                    # VIOLATION AFTER GRACE PERIOD - Position not maintained!
                     violation_start_time = time.time()
                     logger.warning(
                         f"⚠️ [{violation_start_time:.3f}] Position {self.current_position.upper()} NOT MAINTAINED - VIOLATION")
 
-                    # Send first shock (BEFORE audio)
-                    await send_pishock(mode=PISHOCK_MODE_SHOCK)
+                    # Send shock and audio SIMULTANEOUSLY (non-blocking)
+                    asyncio.create_task(send_pishock(mode=PISHOCK_MODE_SHOCK))
                     play_violation()
 
                     self.position_achieved = False
                     self.consecutive_violations += 1
+                    self.round_violations += 1
 
                     # Track shocks during this violation period
                     shocks_this_violation = 1
@@ -692,7 +886,8 @@ class UpDownGame:
                             self.consecutive_violations += 1
 
                             logger.warning(f"⚠️ Position still not maintained - Shock #{shocks_this_violation}")
-                            await send_pishock(mode=PISHOCK_MODE_SHOCK)
+                            asyncio.create_task(send_pishock(mode=PISHOCK_MODE_SHOCK))
+
                             last_shock_time = current_time
 
                             # Check for 10-shock void condition
@@ -736,8 +931,62 @@ class UpDownGame:
                     logger.info(f"⏱️ [{switch_time:.3f}] Commanding {self.current_position.upper()}")
                     await self.command_position(self.current_position, is_rapid=False)
 
-                    # STATE CHANGE: Now waiting for achievement
-                    # Fall through to next iteration where position_achieved is False
+                    # Reset countdown tracker
+                    self.last_countdown_second = int(time.time())
+
+                    # Wait for position to be achieved (monitor task sets this)
+                    # BUT don't wait forever - timeout after transition deadline + 2 seconds
+                    wait_timeout = self.position_transition_deadline + 2.0
+
+                    while not self.position_achieved and self.state == GameState.ROUND:
+                        _ = self.get_board_angle()
+                        if self.check_both_sensors_lost():
+                            await self.handle_sensor_loss_during_round()
+                            return
+
+                        # Check if we've exceeded timeout
+                        current_time = time.time()
+                        if current_time >= wait_timeout:
+                            logger.warning(f"⚠️ Position {self.current_position.upper()} wait timeout - exiting loop")
+                            break  # Exit loop, position not achieved
+
+                        # Countdown logging
+                        remaining = self.position_transition_deadline - current_time
+                        current_second = int(current_time)
+
+                        if current_second != self.last_countdown_second and remaining > 0:
+                            logger.info(f"⏱️ Transition countdown: {int(remaining)} seconds")
+                            self.last_countdown_second = current_second
+
+                        await asyncio.sleep(0.1)
+
+                    # Check if position was actually achieved
+                    if self.position_achieved:
+                        # Position achieved - EXPLICIT timer reset
+                        self.position_start_time = time.time()
+                        achievement_time = self.position_start_time
+
+                        # Generate NEW hold time for this position
+                        config = self.get_level_config()
+                        if self.current_position == 'up':
+                            position_hold_target = random.uniform(*config['hold_time_up'])
+                        else:  # down
+                            position_hold_target = random.uniform(*config['hold_time_down'])
+
+                        logger.info(f"⏱️ [{achievement_time:.3f}] {self.current_position.upper()} achieved!")
+                        logger.info(f"🎲 New position hold time: {position_hold_target:.1f} seconds")
+
+                        # Reset consecutive shock tracking (position achieved successfully)
+                        self.consecutive_violations = 0
+
+                        # Continue to next iteration to start monitoring hold
+                        continue
+                    else:
+                        # Position NOT achieved after timeout
+                        # Fall through to next iteration - STATE 2 will handle continuous shocking
+                        logger.warning(
+                            f"⚠️ Position {self.current_position.upper()} not achieved - entering continuous shocking mode")
+                        # Don't continue, don't generate hold time - just let next iteration handle it
 
             else:
                 # STATE 2: Position not yet achieved - waiting and shocking if taking too long
@@ -746,30 +995,21 @@ class UpDownGame:
 
                 # Check if position is now achieved
                 if self.check_position_correct(self.current_position):
-                    # Position achieved!
-                    self.position_achieved = True
-                    self.position_start_time = time.time()
-                    self.consecutive_violations = 0  # Reset on achievement
-
-                    achievement_time = self.position_start_time
-                    logger.info(f"⏱️ [{achievement_time:.3f}] {self.current_position.upper()} achieved!")
-                    logger.info(f"    Took {time_waiting:.1f}s to achieve")
-
-                    # Generate new random hold time
-                    position_hold_target = random.uniform(POSITION_HOLD_MIN, POSITION_HOLD_MAX)
-                    logger.info(f"🎲 New position hold time: {position_hold_target:.1f} seconds")
-
+                    # Position achieved! (detected in main loop, not monitor task)
+                    # Note: Monitor task may have already set position_achieved=True
+                    # Hold time was already generated in STATE 1 after position switch
+                    logger.debug(f"STATE 2: Position {self.current_position.upper()} achieved")
                     await asyncio.sleep(0.1)
                     continue
 
                 # Position still not achieved - check if we need to shock
-                # Initial 7-second violation is handled by monitor_position_achievement()
+                # Initial transition-time violation is handled by monitor_position_achievement()
                 # But we need to CONTINUE shocking every 5 seconds after that
 
-                if time_waiting > 7.0:
+                if time_waiting > self.position_transition_deadline - self.position_command_start:
                     # Beyond initial violation time - need continuous shocking
-                    # Check when we last shocked
-                    if not hasattr(self, '_continuous_shock_start'):
+                    # Check when we last shocked (use None check, not hasattr)
+                    if self._continuous_shock_start is None:
                         # First time entering continuous shock mode
                         self._continuous_shock_start = current_time
                         self._continuous_shock_count = 1  # monitor_position_achievement already sent first shock
@@ -783,7 +1023,7 @@ class UpDownGame:
 
                         logger.warning(
                             f"⚠️ Position {self.current_position.upper()} still not achieved - Continuous shock #{self._continuous_shock_count}")
-                        await send_pishock(mode=PISHOCK_MODE_SHOCK)
+                        asyncio.create_task(send_pishock(mode=PISHOCK_MODE_SHOCK))
                         self._last_continuous_shock = current_time
 
                         # Check for 10-shock void condition
@@ -793,18 +1033,19 @@ class UpDownGame:
                             await self.void_round()
                             return
                 else:
-                    # Still within initial 7-second window
-                    # Clear any continuous shock tracking
-                    if hasattr(self, '_continuous_shock_start'):
-                        delattr(self, '_continuous_shock_start')
-                        delattr(self, '_continuous_shock_count')
-                        delattr(self, '_last_continuous_shock')
+                    # Still within initial transition window
+                    # Reset continuous shock tracking
+                    self._continuous_shock_start = None
+                    self._continuous_shock_count = None
+                    self._last_continuous_shock = None
 
             await asyncio.sleep(0.1)
 
     async def end_round(self):
-        """End current round"""
-        logger.info("Round ending...")
+        """End current round and determine pass/fail"""
+        logger.info("=" * 60)
+        logger.info("ROUND ENDING")
+        logger.info("=" * 60)
 
         # Turn off all bulbs
         await all_bulbs_off()
@@ -812,11 +1053,12 @@ class UpDownGame:
         # Send vibration
         await send_vibration()
 
-        # Play completion audio
-        play_round_over()
+        # Determine pass/fail
+        config = self.get_level_config()
+        passed = self.round_violations < config['violation_limit']
 
-        # Phase 1: Just add round time to completed training
-        self.completed_training_time += self.current_round_duration
+        # Apply results (credits time, awards bonus if hard passed, advances/resets level)
+        self.apply_round_result(passed)
 
         logger.info(f"Completed training: {self.completed_training_time / 60:.1f} minutes")
         logger.info(f"Remaining: {self.remaining_training_time / 60:.1f} minutes")
@@ -831,19 +1073,30 @@ class UpDownGame:
     async def start_break(self):
         """Start mandatory break"""
         self.state = GameState.BREAK
-        self.current_break_duration = random.randint(BREAK_DURATION_MIN, BREAK_DURATION_MAX)  # CHANGED
+        self.current_break_duration = random.randint(BREAK_DURATION_MIN, BREAK_DURATION_MAX)
         self.break_start_time = time.time()
 
         logger.info(f"Break started: {self.current_break_duration} seconds")
 
+        # Play round over audio and get duration
+        round_over_duration = play_round_over()
+
         # Turn off all lights
         await all_bulbs_off()
 
+        # Wait for round_over audio to finish before playing status
+        if round_over_duration > 0:
+            await asyncio.sleep(round_over_duration + 0.3)  # Add 0.3s buffer
+
+        # Play round status audio (passed or failed)
+        if hasattr(self, '_last_round_passed'):
+            if self._last_round_passed:
+                play_round_passed()
+            else:
+                play_round_failed()
+
         # Start white noise
         start_white_noise()
-
-        # Play break audio
-        play_round_over()
 
         # Wait for break to end
         await self.run_break()

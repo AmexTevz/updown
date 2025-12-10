@@ -1,4 +1,3 @@
-
 import os
 import random
 import logging
@@ -8,6 +7,7 @@ from pathlib import Path
 
 try:
     import pygame
+
     pygame.mixer.init()
     AUDIO_AVAILABLE = True
 except:
@@ -16,6 +16,7 @@ except:
 from config import AUDIO_BASE_PATH, AUDIO_VOLUME
 
 logger = logging.getLogger(__name__)
+
 
 # ============================================================================
 # AUDIO CONTEXT REGISTRY
@@ -45,12 +46,26 @@ class AudioRegistry:
     SENSOR_ISSUE = "sensor_issue"
     SENSOR_ISSUE_RESOLVED = "sensor_issue_resolved"
 
+    # Extensions (Phase 6)
     EXTENSION_GRANTED = "extension_granted"
     EXTENSION_DENIED = "extension_denied"
     EXTENSION_DENIED_LIMIT = "extension_denied_limit"
 
+    # Level announcements (Phase 6)
+    EASY_LEVEL = "easy_level"
+    MEDIUM_LEVEL = "medium_level"
+    HARD_LEVEL = "hard_level"
+
+    # Round status (Phase 6)
+    ROUND_PASSED = "round_passed"
+    ROUND_FAILED = "round_failed"
+
+    # Extension availability (Phase 6)
+    EXTENSION_AVAILABLE = "extension_available"
+
     # Game End (game.py)
     TRAINING_ENDED = "training_ended"
+
     @classmethod
     def get_all_contexts(cls):
         """Get all registered audio contexts"""
@@ -58,6 +73,7 @@ class AudioRegistry:
             value for name, value in vars(cls).items()
             if not name.startswith('_') and isinstance(value, str)
         ]
+
 
 # ============================================================================
 # AUDIO MANAGER
@@ -107,21 +123,23 @@ class AudioManager:
 
         logger.info(f"Audio scan complete: {len(self.contexts)} contexts found")
 
-    def play(self, context: str, fallback_text: str = ""):
+    def play(self, context: str, fallback_text: str = "") -> float:
         """
         Play audio for given context
         Randomly selects from available variations
         Falls back to logging if no audio file found
         Prevents overlapping audio by stopping previous sound
+
+        Returns: Duration of the audio in seconds (0.0 if failed or unavailable)
         """
         if not self.audio_available:
             logger.info(f"[AUDIO] {fallback_text or context}")
-            return
+            return 0.0
 
         if context not in self.contexts:
             logger.warning(f"[AUDIO] No audio for context '{context}' - using fallback")
             logger.info(f"[AUDIO - Missing files] {fallback_text or context}")
-            return
+            return 0.0
 
         try:
             # Stop any currently playing non-white-noise audio
@@ -137,9 +155,15 @@ class AudioManager:
             sound.set_volume(AUDIO_VOLUME)
             sound.play()
 
+            # Get and return duration
+            duration = sound.get_length()
+            logger.debug(f"[AUDIO] Duration: {duration:.2f}s")
+            return duration
+
         except Exception as e:
             logger.error(f"[AUDIO] Failed to play '{context}': {e}")
             logger.info(f"[AUDIO - Error fallback] {fallback_text or context}")
+            return 0.0
 
     def start_white_noise_loop(self):
         """
@@ -214,78 +238,131 @@ class AudioManager:
         if self.audio_available:
             pygame.mixer.quit()
 
-# Global audio manager instance
+
+# ============================================================================
+# GLOBAL AUDIO MANAGER INSTANCE
+# ============================================================================
+
 audio_manager = AudioManager()
+
 
 # ============================================================================
 # CONVENIENCE FUNCTIONS
 # ============================================================================
 
-def play_audio(context: str, fallback_text: str = ""):
-    """Play audio for given context"""
-    audio_manager.play(context, fallback_text)
+def play_audio(context: str, fallback_text: str = "") -> float:
+    """
+    Play audio for given context with fallback text
+    Returns: Duration of the audio in seconds
+    """
+    return audio_manager.play(context, fallback_text)
+
 
 def start_white_noise():
     """Start looping white noise"""
     audio_manager.start_white_noise_loop()
 
+
 def stop_white_noise():
     """Stop white noise"""
     audio_manager.stop_white_noise()
 
-# ============================================================================
-# CONTEXT-SPECIFIC FUNCTIONS (for convenience)
-# ============================================================================
+
+def cleanup_audio():
+    """Cleanup audio system"""
+    audio_manager.cleanup()
+
 
 # ============================================================================
-# CONTEXT-SPECIFIC FUNCTIONS
+# CONTEXT-SPECIFIC FUNCTIONS (all return duration in seconds)
 # ============================================================================
 
 # Startup/Calibration
-def play_first_press():
-    play_audio(AudioRegistry.FIRST_PRESS, "Press again to confirm")
+def play_first_press() -> float:
+    return play_audio(AudioRegistry.FIRST_PRESS, "Press again to confirm")
 
-def play_second_press():
-    play_audio(AudioRegistry.SECOND_PRESS, "Game will start shortly")
+
+def play_second_press() -> float:
+    return play_audio(AudioRegistry.SECOND_PRESS, "Game will start shortly")
+
 
 # Position Commands
-def play_position_down():
-    play_audio(AudioRegistry.POSITION_DOWN, "Down")
+def play_position_down() -> float:
+    return play_audio(AudioRegistry.POSITION_DOWN, "Down")
 
-def play_position_up():
-    play_audio(AudioRegistry.POSITION_UP, "Up")
+
+def play_position_up() -> float:
+    return play_audio(AudioRegistry.POSITION_UP, "Up")
+
 
 # Round Events
-def play_round_starting():
-    play_audio(AudioRegistry.ROUND_STARTING, "Round starting")
+def play_round_starting() -> float:
+    return play_audio(AudioRegistry.ROUND_STARTING, "Round starting")
 
-def play_round_over():
-    play_audio(AudioRegistry.ROUND_OVER, "Round complete")
 
-def play_violation():
+def play_round_over() -> float:
+    return play_audio(AudioRegistry.ROUND_OVER, "Round complete")
+
+
+def play_violation() -> float:
     """Play on FIRST violation in a pose only"""
-    play_audio(AudioRegistry.VIOLATION, "Violation")
+    return play_audio(AudioRegistry.VIOLATION, "Violation")
 
-def play_ten_in_row():
+
+def play_ten_in_row() -> float:
     """Play when 10 consecutive violations trigger void"""
-    play_audio(AudioRegistry.TEN_IN_ROW, "Ten consecutive violations - round voided")
+    return play_audio(AudioRegistry.TEN_IN_ROW, "Ten consecutive violations - round voided")
+
 
 # Sensor Events
-def play_sensor_issue():
-    play_audio(AudioRegistry.SENSOR_ISSUE, "Sensor disconnected")
+def play_sensor_issue() -> float:
+    return play_audio(AudioRegistry.SENSOR_ISSUE, "Sensor disconnected")
 
-def play_sensor_issue_resolved():
-    play_audio(AudioRegistry.SENSOR_ISSUE_RESOLVED, "Sensor reconnected")
+
+def play_sensor_issue_resolved() -> float:
+    return play_audio(AudioRegistry.SENSOR_ISSUE_RESOLVED, "Sensor reconnected")
+
+
+# Extensions
+def play_extension_granted() -> float:
+    return play_audio(AudioRegistry.EXTENSION_GRANTED, "Extension granted")
+
+
+def play_extension_denied() -> float:
+    return play_audio(AudioRegistry.EXTENSION_DENIED, "Extension denied")
+
+
+def play_extension_denied_limit() -> float:
+    return play_audio(AudioRegistry.EXTENSION_DENIED_LIMIT, "No extension time remaining")
+
+
+# Level announcements
+def play_easy_level() -> float:
+    return play_audio(AudioRegistry.EASY_LEVEL, "Easy level")
+
+
+def play_medium_level() -> float:
+    return play_audio(AudioRegistry.MEDIUM_LEVEL, "Medium level")
+
+
+def play_hard_level() -> float:
+    return play_audio(AudioRegistry.HARD_LEVEL, "Hard level")
+
+
+# Round status
+def play_round_passed() -> float:
+    return play_audio(AudioRegistry.ROUND_PASSED, "Round passed")
+
+
+def play_round_failed() -> float:
+    return play_audio(AudioRegistry.ROUND_FAILED, "Round failed")
+
+
+# Extension availability
+def play_extension_available() -> float:
+    return play_audio(AudioRegistry.EXTENSION_AVAILABLE, "Extension available")
+
 
 # Game End
-def play_training_ended():
-    play_audio(AudioRegistry.TRAINING_ENDED, "Training complete")
-
-def play_extension_granted():
-    play_audio(AudioRegistry.EXTENSION_GRANTED, "Extension granted")
-
-def play_extension_denied():
-    play_audio(AudioRegistry.EXTENSION_DENIED, "Extension denied")
-
-def play_extension_denied_limit():
-    play_audio(AudioRegistry.EXTENSION_DENIED_LIMIT, "No extension time remaining")
+def play_training_ended() -> float:
+    return play_audio(AudioRegistry.TRAINING_ENDED, "Training complete")
