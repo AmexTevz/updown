@@ -680,11 +680,17 @@ class UpDownGame:
         # If qualified for extension, play availability audio
         if self.extension_qualified:
             await asyncio.sleep(1.0)  # Brief pause between level and extension audio
-            play_extension_available()
+
 
         # Monitor for 20 seconds (check buttons)
         prep_start = time.time()
         while time.time() - prep_start < PREPARATION_WINDOW:
+            # If extension is active, run it instead
+            if self.extension_active:
+                await self.run_extension()
+                # After extension ends, continue prep monitoring
+                continue
+
             # Check Button_1 (extension request)
             pressed_1, self.last_button_1_value = await check_button_press(
                 BUTTON_1, self.last_button_1_value
@@ -692,9 +698,10 @@ class UpDownGame:
             if pressed_1:
                 if self.extension_qualified:
                     logger.info("Button 1 pressed - Extension granted!")
-                    # Grant extension immediately
+                    play_extension_granted()
+                    # Start extension (sets flag)
                     await self.start_extension()
-                    # After extension ends, we'll return to prep to finish the window
+                    # Next iteration will run the extension
                 else:
                     # Not qualified - silent ignore
                     logger.debug("Button 1 pressed but not qualified for extension (ignored)")
@@ -761,18 +768,30 @@ class UpDownGame:
         - 10 shocks = void round
         """
         # Round starts in DOWN - wait for it to be verified
-        logger.info("⏱️ Waiting for initial DOWN position verification...")
+        # Round starts - command DOWN position
+        logger.info("Round starting - commanding initial DOWN position")
+        await self.command_position('down', is_rapid=False)
+
+        # Wait for DOWN to be achieved (with timeout like position switches)
+        wait_timeout = self.position_transition_deadline + 2.0
+
         while not self.position_achieved and self.state == GameState.ROUND:
             if self.check_both_sensors_lost():
                 await self.handle_sensor_loss_during_round()
                 return
 
-            if self.check_position_correct('down'):
-                self.position_achieved = True
-                self.position_start_time = time.time()
-                logger.info(f"⏱️ [{self.position_start_time:.3f}] Initial DOWN position verified")
+            # Check timeout
+            if time.time() >= wait_timeout:
+                logger.warning("⏱️ Initial DOWN position wait timeout")
+                break
 
             await asyncio.sleep(0.1)
+
+        # Log result
+        if self.position_achieved:
+            logger.info(f"⏱️ [{self.position_start_time:.3f}] Initial DOWN position achieved")
+        else:
+            logger.warning("⚠️ Initial DOWN position not achieved - will enter continuous shocking")
 
         # Generate random hold time for first position
         # Get hold time based on position and level
@@ -994,11 +1013,22 @@ class UpDownGame:
                 time_waiting = current_time - self.position_command_start
 
                 # Check if position is now achieved
+                # Check if position is now achieved
                 if self.check_position_correct(self.current_position):
-                    # Position achieved! (detected in main loop, not monitor task)
-                    # Note: Monitor task may have already set position_achieved=True
-                    # Hold time was already generated in STATE 1 after position switch
-                    logger.debug(f"STATE 2: Position {self.current_position.upper()} achieved")
+                    # Position achieved! Set flag and reset timer
+                    self.position_achieved = True
+                    self.position_start_time = time.time()
+                    self.consecutive_violations = 0  # Reset on success
+
+                    # Clear continuous shock tracking
+                    self._continuous_shock_start = None
+                    self._continuous_shock_count = None
+                    self._last_continuous_shock = None
+
+                    logger.info(f"✓ STATE 2: Position {self.current_position.upper()} achieved")
+                    logger.info(f"   Exiting continuous shocking mode")
+
+                    # Now position_achieved = True, next iteration goes to STATE 1
                     await asyncio.sleep(0.1)
                     continue
 
@@ -1233,17 +1263,23 @@ class UpDownGame:
         """
         Run extension period
         - Monitor time for fan activation
+        - Check for 4-hour timeout
         - Wait for button press to end
         """
         current_time = time.time()
         extension_elapsed = current_time - self.extension_start_time
 
+        # Check if 4-hour timeout reached
+        if extension_elapsed >= TOTAL_EXTENSION_TIME_ALLOWED - self.total_extension_time_used:
+            logger.warning("⚠️  Extension 4-hour limit reached - ending extension")
+            await self.end_extension(reason="timeout")
+            return
+
         # Check if fan should activate
         if not self.extension_fan_triggered and current_time >= self.extension_fan_trigger_time:
-            logger.info("⚠️  Extension time limit reached - FAN ON")
+            logger.info("⚠️  Extension fan activation time - FAN ON")
             await fan_control("on")
             self.extension_fan_triggered = True
-
         # Check for button press to end extension
         current_button_1 = await read_button(BUTTON_1)
         current_button_2 = await read_button(BUTTON_2)
@@ -1265,7 +1301,7 @@ class UpDownGame:
             self._last_button_2_value = current_button_2
 
         if button_pressed:
-            await self.end_extension()
+            await self.end_extension(reason="button")  # ← ADD reason parameter
 
         # Log progress every minute
         if int(extension_elapsed) % 60 == 0 and extension_elapsed > 0:
@@ -1273,17 +1309,21 @@ class UpDownGame:
 
         await asyncio.sleep(0.1)
 
-    async def end_extension(self):
+    async def end_extension(self, reason: str = "button"):
         """
         End extension period
         - Track time used
         - Turn off fan
-        - Return to normal break
+        - Play appropriate audio
+        - Return to normal break/prep
+
+        Args:
+            reason: "button" (user ended) or "timeout" (4 hour limit)
         """
         extension_duration = time.time() - self.extension_start_time
 
         logger.info("=" * 60)
-        logger.info("EXTENSION ENDED")
+        logger.info(f"EXTENSION ENDED ({reason.upper()})")
         logger.info("=" * 60)
         logger.info(f"Extension duration: {extension_duration / 60:.1f} minutes")
 
@@ -1298,6 +1338,12 @@ class UpDownGame:
         if self.extension_fan_triggered:
             logger.info("Turning off fan")
             await fan_control("off")
+
+        # Play appropriate audio
+        if reason == "timeout":
+            play_extension_expired()
+        else:  # button
+            play_extension_ended()
 
         # Reset extension state
         self.extension_active = False

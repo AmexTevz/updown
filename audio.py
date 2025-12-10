@@ -60,11 +60,12 @@ class AudioRegistry:
     ROUND_PASSED = "round_passed"
     ROUND_FAILED = "round_failed"
 
-    # Extension availability (Phase 6)
-    EXTENSION_AVAILABLE = "extension_available"
+    EXTENSION_ENDED = "extension_ended"
+    EXTENSION_EXPIRED = "extension_expired"
 
     # Game End (game.py)
     TRAINING_ENDED = "training_ended"
+
 
     @classmethod
     def get_all_contexts(cls):
@@ -358,11 +359,13 @@ def play_round_failed() -> float:
     return play_audio(AudioRegistry.ROUND_FAILED, "Round failed")
 
 
-# Extension availability
-def play_extension_available() -> float:
-    return play_audio(AudioRegistry.EXTENSION_AVAILABLE, "Extension available")
-
-
 # Game End
 def play_training_ended() -> float:
     return play_audio(AudioRegistry.TRAINING_ENDED, "Training complete")
+
+def play_extension_ended() -> float:
+    return play_audio(AudioRegistry.EXTENSION_ENDED, "Extension ended")
+
+
+def play_extension_expired() -> float:
+    return play_audio(AudioRegistry.EXTENSION_EXPIRED, "Extension time expired")
