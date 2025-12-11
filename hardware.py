@@ -107,6 +107,27 @@ async def fan_control(state: str) -> bool:
     hardware_state.fan_online = success
     return success
 
+async def heat_control(state: str) -> bool:
+    """Control heat plug"""
+    success = await shelly_control(HEAT, state, "relay")
+    # No hardware_state tracking needed for heat
+    return success
+
+async def set_heat_fan_state(heat_on: bool):
+    """
+    Set heat/fan state (mutually exclusive)
+    If heat ON → fan OFF
+    If heat OFF → fan ON
+    """
+    if heat_on:
+        await heat_control("on")
+        await fan_control("off")
+        logger.info("→ Mode: HEAT ON / FAN OFF")
+    else:
+        await heat_control("off")
+        await fan_control("on")
+        logger.info("→ Mode: HEAT OFF / FAN ON")
+
 # ============================================================================
 # PLUG CONTROL
 # ============================================================================

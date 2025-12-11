@@ -87,9 +87,10 @@ class AudioManager:
         self.white_noise_file = None
         self.white_noise_playing = False
         self.white_noise_task = None
+        self.current_volume = AUDIO_VOLUME  # Store current volume
 
         if self.audio_available:
-            logger.info("Audio system initialized")
+            logger.info(f"Audio system initialized - Volume: {int(self.current_volume * 100)}%")
             self._scan_audio_directory()
         else:
             logger.warning("Audio system not available - pygame not loaded")
@@ -124,6 +125,14 @@ class AudioManager:
 
         logger.info(f"Audio scan complete: {len(self.contexts)} contexts found")
 
+    def set_volume(self, volume: float):
+        """Set global volume for all future sounds (0.0 to 1.0)"""
+        if not self.audio_available:
+            return
+
+        self.current_volume = max(0.0, min(1.0, volume))  # Clamp between 0-1
+        logger.info(f"Volume set to {int(self.current_volume * 100)}%")
+
     def play(self, context: str, fallback_text: str = "") -> float:
         """
         Play audio for given context
@@ -144,21 +153,20 @@ class AudioManager:
 
         try:
             # Stop any currently playing non-white-noise audio
-            # (Keep white noise playing on its dedicated channel)
-            pygame.mixer.stop()  # Stops all channels except reserved ones
+            pygame.mixer.stop()
 
             # Select random variation
             audio_file = random.choice(self.contexts[context])
             logger.info(f"[AUDIO] Playing: {context} -> {audio_file.name}")
 
-            # Load and play
+            # Load and play with CURRENT volume
             sound = pygame.mixer.Sound(str(audio_file))
-            sound.set_volume(AUDIO_VOLUME)
+            sound.set_volume(self.current_volume)  # Use stored volume
             sound.play()
 
             # Get and return duration
             duration = sound.get_length()
-            logger.debug(f"[AUDIO] Duration: {duration:.2f}s")
+            logger.debug(f"[AUDIO] Duration: {duration:.2f}s at {int(self.current_volume * 100)}% volume")
             return duration
 
         except Exception as e:
@@ -168,7 +176,7 @@ class AudioManager:
 
     def start_white_noise_loop(self):
         """
-        Start white noise with random restart every 25-50 seconds
+        Start white noise with random restart every 10-20 minutes
         Runs as background task
         """
         if self.white_noise_playing:
@@ -186,19 +194,21 @@ class AudioManager:
     async def _white_noise_loop(self):
         """
         Internal white noise loop
-        Plays, waits 25-50 seconds, restarts
+        Plays, waits 10-20 minutes, restarts
         """
         try:
             while self.white_noise_playing:
                 try:
-                    # Load and play white noise
+                    # Load and play white noise with CURRENT volume
                     sound = pygame.mixer.Sound(self.white_noise_file)
-                    sound.set_volume(AUDIO_VOLUME * 0.7)  # Slightly quieter than feedback
+                    sound.set_volume(self.current_volume * 0.7)  # Slightly quieter
                     channel = sound.play()
 
-                    # Random duration: 25-50 seconds
-                    duration = random.randint(25, 50)
-                    logger.debug(f"White noise playing for {duration} seconds")
+                    # Random duration: 10-20 minutes
+                    duration = random.randint(10 * 60, 20 * 60)
+
+                    logger.debug(
+                        f"White noise playing for {duration} seconds at {int(self.current_volume * 70)}% volume")
 
                     # Wait for duration
                     await asyncio.sleep(duration)
@@ -369,3 +379,8 @@ def play_extension_ended() -> float:
 
 def play_extension_expired() -> float:
     return play_audio(AudioRegistry.EXTENSION_EXPIRED, "Extension time expired")
+
+
+def set_audio_volume(volume: float):
+    """Set global audio volume (0.0 to 1.0)"""
+    audio_manager.set_volume(volume)
