@@ -339,8 +339,8 @@ def play_extension_granted() -> float:
     return play_audio(AudioRegistry.EXTENSION_GRANTED, "Extension granted")
 
 
-def play_extension_denied() -> float:
-    return play_audio(AudioRegistry.EXTENSION_DENIED, "Extension denied")
+# def play_extension_denied() -> float:
+#     return play_audio(AudioRegistry.EXTENSION_DENIED, "Extension denied")
 
 
 def play_extension_denied_limit() -> float:

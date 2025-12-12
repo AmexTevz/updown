@@ -9,7 +9,7 @@ BULB_1 = 206  # DOWN position indicator
 BULB_2 = 202  # UP position indicator
 STROBE = 225  # Warning/preparation strobe light
 FAN = 211     # Extended break fan (>10 min)
-HEAT = 203    # Heat plug (on by default, off during void/long extension)  # ← ADD THIS
+HEAT = 228    # Heat plug (on by default, off during void/long extension)  # ← ADD THIS
 PLUG = 226    # Game end signal
 
 BUTTON_1 = 227  # Break extension request
@@ -41,6 +41,7 @@ VOID_BREAK_DURATION = 180  # 3 minutes
 VOID_SHOCK_INTERVAL_MIN = 15  # seconds
 VOID_SHOCK_INTERVAL_MAX = 30
 
+
 # ============================================================================
 # GAME TIMING
 # ============================================================================
@@ -54,7 +55,7 @@ ROUND_DURATION_MAX = 6 * 60
 
 BREAK_EXTENSION_CHANCE = 1.0                    # 50% chance of approval
 TOTAL_EXTENSION_TIME_ALLOWED = 4 * 3600        # 5 hours total pool
-EXTENSION_REQUEST_COOLDOWN = 15                 # 15 seconds between requests
+EXTENSION_REQUEST_COOLDOWN = 25                 # 15 seconds between requests
 EXTENSION_FAN_ACTIVATION_MIN = 15 * 60          # 15 minutes
 EXTENSION_FAN_ACTIVATION_MAX = 25 * 60
 
@@ -85,16 +86,16 @@ RAPID_DURATION_MIN = 2 * 60
 RAPID_DURATION_MAX = 4 * 60
 RAPID_SUSPENSE_WAIT = 3 * 60
 
-BREAK_DURATION_MIN = 12  # 2 minutes ------------------
-BREAK_DURATION_MAX = 24  # 4 minutes -----------------
+BREAK_DURATION_MIN = 30  # 2 minutes ------------------
+BREAK_DURATION_MAX = 45  # 4 minutes -----------------
 
 
 # Pre-game wait time (after button confirmation)
 # PREGAME_WAIT_MIN = 2 * 60  # 2 minutes (normal)
 # PREGAME_WAIT_MAX = 4 * 60  # 4 minutes (normal)
 
-PREGAME_WAIT_MIN = 10 #-------------
-PREGAME_WAIT_MAX = 15 #-------------
+PREGAME_WAIT_MIN = 20 #-------------
+PREGAME_WAIT_MAX = 30 #-------------
 
 
 PREGAME_WAIT_MIN_TESTING = 5   # 5 seconds (testing)
@@ -106,7 +107,7 @@ ANGLE_DOWN_THRESHOLD = 20
 ANGLE_UP_THRESHOLD = 80
 
 SENSOR_CHECK_RATE = 30
-SENSOR_PATIENCE_TIME = 2 * 3600  # 2 HOURS patience for sensor reconnection
+SENSOR_PATIENCE_TIME = 1 * 3600  # 2 HOURS patience for sensor reconnection
 
 # ============================================================================
 
@@ -135,28 +136,31 @@ HARDWARE_MONITOR_INTERVAL = 10  # Check every 10 seconds for reconnection
 # ============================================================================
 # LEVEL SYSTEM (Phase 6 - Simplified)
 # ============================================================================
-
+# Video Recording Configuration
+VIDEO_RECORDING_ENABLED = True  # Set to False to disable
+VIDEO_START_BEFORE_PREP = 10    # Seconds before prep to start
+VIDEO_STOP_AFTER_BREAK = 10     # Seconds after break to stop
 
 LEVEL_CONFIG = {
     'easy': {
         'round_duration': (18, 30),      # 3-5 minutes
-        'transition_time': (8, 12),        # 8-12 seconds random per command
-        'hold_time_up': (3, 9),            # 3-9 seconds
-        'hold_time_down': (6, 18),         # 6-18 seconds
-        'violation_limit': 10               # Less than 6 to pass
+        'transition_time': (10, 12),        # 8-12 seconds random per command
+        'hold_time_up': (3, 8),            # 3-9 seconds
+        'hold_time_down': (12, 16),         # 6-18 seconds
+        'violation_limit': 8               # Less than 6 to pass
     },
     'medium': {
         'round_duration': (24, 36),      # 4-6 minutes
-        'transition_time': (6, 10),        # 6-10 seconds
-        'hold_time_up': (6, 15),           # 6-15 seconds
-        'hold_time_down': (5, 12),         # 5-12 seconds
+        'transition_time': (8, 10),        # 6-10 seconds
+        'hold_time_up': (7, 12),           # 6-15 seconds
+        'hold_time_down': (8, 12),         # 5-12 seconds
         'violation_limit': 6               # Less than 4 to pass
     },
     'hard': {
         'round_duration': (30, 42),      # 5-7 minutes
-        'transition_time': (5, 8),         # 5-8 seconds
-        'hold_time_up': (10, 20),          # 10-20 seconds
-        'hold_time_down': (3, 10),         # 3-10 seconds
+        'transition_time': (6, 8),         # 5-8 seconds
+        'hold_time_up': (11, 16),          # 10-20 seconds
+        'hold_time_down': (4, 8),         # 3-10 seconds
         'violation_limit': 4               # Less than 2 to pass
     }
 }

@@ -489,26 +489,18 @@ async def main():
         game.is_running = True
 
         # Mark game as started and set times
-        game.game_started = True
-        game.start_time = datetime.now()
-        game.deadline = game.start_time + timedelta(hours=GAME_DURATION_HOURS)
-
-        logger.info(f"Game started: {game.start_time.strftime('%H:%M:%S')}")
-        logger.info(f"Deadline: {game.deadline.strftime('%H:%M:%S')}")
-
-        # Start hardware monitoring
+        # Start hardware monitoring FIRST
         start_hardware_monitoring()
         logger.info("✓ Hardware monitoring active")
         logger.info("")
 
-        # Go directly to preparation phase (15 seconds with strobe)
+        # Start the game (this handles video + prep internally)
         logger.info("=" * 70)
-        logger.info(" ENTERING PREPARATION PHASE")
+        logger.info(" STARTING GAME")
         logger.info("=" * 70)
         logger.info("")
 
-        await game.enter_preparation()
-
+        await game.start_game()
         # Start game loop (it will continue from preparation into rounds)
         try:
             await game_loop(game)

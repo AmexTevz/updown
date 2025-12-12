@@ -22,6 +22,8 @@ from audio import *
 import sys
 sys.path.append('.')
 from main_wit import SensorDataQueue, SensorState
+from video_recorder import VideoRecorder
+
 
 
 logger = logging.getLogger(__name__)
@@ -146,6 +148,9 @@ class UpDownGame:
         self.pose_changes_this_round = 0
         self.violations_this_round = []  # List of {type, start_time, correction_time}
         self.peak_consecutive_violations = 0
+        self.round_time_credited = 0  # Actual credited time (completed holds only)
+        self.current_hold_in_progress = False
+        self.current_hold_credited = False  # Has this hold been credited?
 
         # Heat/Fan state
         self.heat_on = True  # Heat on by default
@@ -160,8 +165,7 @@ class UpDownGame:
         self.last_break_extension_fan_time = None
         self.last_void_shock_count = 0
         self.last_void_shock_times = []
-
-
+        self.video_recorder = VideoRecorder(enabled=VIDEO_RECORDING_ENABLED)
 
         logger.info("=" * 60)
         logger.info("UP/DOWN TRAINING GAME - PHASE 1")
@@ -326,11 +330,10 @@ class UpDownGame:
 
         f.write(f"{'=' * 80}\n")
 
-
     def get_board_angle(self) -> Optional[float]:
         """
         Get current board angle with fallback
-        Always prefers primary sensor, automatically switches back when available
+        STICKY PREFERENCE: Stay on current sensor unless it fails
         """
         angles = self.sensor_queue.get_all_angles()
         current_time = time.time()
@@ -364,40 +367,53 @@ class UpDownGame:
                 backup_has_data
         )
 
-        # ALWAYS TRY PRIMARY FIRST
-        if primary_available:
-            # Check if we need to switch back from backup
-            if self.active_board_sensor != 'w_back.txt':
-                logger.info("=" * 60)
-                logger.info("✓ PRIMARY SENSOR RECONNECTED - SWITCHING BACK")
-                logger.info("=" * 60)
-                self.active_board_sensor = 'w_back.txt'
-
-                # Only play audio if we were in "both lost" state
-                if self.both_sensors_were_lost:
-                    play_sensor_issue_resolved()
-                    self.both_sensors_were_lost = False
-
-            self.primary_sensor_lost_time = None
-            return angles.get('w_back.txt')
-
-        # Try backup if primary unavailable
-        if backup_available:
-            if self.active_board_sensor != 'Orientation.txt':
-                logger.info("Switched to backup board sensor")
+        # STICKY LOGIC: Try current sensor first, only switch if it fails
+        if self.active_board_sensor == 'w_back.txt':
+            # Currently on primary
+            if primary_available:
+                # Primary still good - stay on it
+                self.primary_sensor_lost_time = None
+                return angles.get('w_back.txt')
+            elif backup_available:
+                # Primary failed, switch to backup
+                logger.warning("⚠️ PRIMARY SENSOR LOST - Switching to backup")
                 self.active_board_sensor = 'Orientation.txt'
-                # DON'T play audio - just switching, not recovering from both lost
+                return angles.get('Orientation.txt')
+            else:
+                # Both unavailable
+                if not self.both_sensors_were_lost:
+                    self.both_sensors_were_lost = True
+                return None
 
-            self.backup_sensor_lost_time = None
-            return angles.get('Orientation.txt')
+        elif self.active_board_sensor == 'Orientation.txt':
+            # Currently on backup
+            if backup_available:
+                # Backup still good - STAY on it (don't switch back to primary)
+                self.backup_sensor_lost_time = None
+                return angles.get('Orientation.txt')
+            elif primary_available:
+                # Backup failed, switch to primary
+                logger.warning("⚠️ BACKUP SENSOR LOST - Switching to primary")
+                self.active_board_sensor = 'w_back.txt'
+                return angles.get('w_back.txt')
+            else:
+                # Both unavailable
+                if not self.both_sensors_were_lost:
+                    self.both_sensors_were_lost = True
+                return None
 
-        # Both sensors unavailable - this is the problem state
-        if not self.both_sensors_were_lost:
-            # First time both lost
-            self.both_sensors_were_lost = True
-            # sensor_issue audio is played in check_both_sensors_lost()
-
-        return None
+        else:
+            # No active sensor set yet - prefer primary
+            if primary_available:
+                logger.info("✓ Starting with PRIMARY sensor")
+                self.active_board_sensor = 'w_back.txt'
+                return angles.get('w_back.txt')
+            elif backup_available:
+                logger.info("✓ Starting with BACKUP sensor")
+                self.active_board_sensor = 'Orientation.txt'
+                return angles.get('Orientation.txt')
+            else:
+                return None
 
     def check_both_sensors_lost(self) -> bool:
         """
@@ -821,33 +837,64 @@ class UpDownGame:
                 logger.info("  → Next level: HARD")
                 self.extension_qualified = False
 
+
             elif self.current_level == 'hard':
+
                 # CYCLE COMPLETE! Award 20 min bonus
+
                 self.completed_training_time += CYCLE_COMPLETION_BONUS
+
                 logger.info(f"  ★ CYCLE COMPLETE! Bonus: {CYCLE_COMPLETION_BONUS / 60} min")
+
                 self.current_level = 'easy'
+
                 logger.info("  → Next level: EASY (new cycle)")
-                self.extension_qualified = True  # Hard passed - qualify for extension
+
+                logger.info("  No extension after cycle completion")
+
+                self.extension_qualified = False  # SUCCESS doesn't grant mercy
 
         else:  # Failed
+
             logger.warning(f"✗ ROUND FAILED!")
+
             logger.warning(f"  Violations: {self.round_violations} (limit: {config['violation_limit']})")
+
+            # Save current level BEFORE resetting (important!)
+
+            failed_level = self.current_level
+
             logger.warning(f"  Restarting from EASY level")
 
             # Back to Easy
+
             self.current_level = 'easy'
 
-            # Qualify for extension (failed round)
+            # Extension qualification: Medium/Hard failures only (not Easy, not Void)
+
             if not self.void_occurred:
-                self.extension_qualified = True
-                logger.info("  Break extension qualified (round failed)")
+
+                if failed_level in ['medium', 'hard']:
+
+                    self.extension_qualified = True
+
+                    logger.info(f"  Break extension qualified (failed {failed_level.upper()} level)")
+
+                else:  # failed Easy
+
+                    self.extension_qualified = False
+
+                    logger.info("  No extension (Easy failure - must push through)")
+
             else:
+
                 self.extension_qualified = False
+
                 logger.warning("  NO extension allowed (round voided)")
 
-        # Reset round violation counter
-        self.round_violations = 0
+            # Reset round violation counter
 
+            self.round_violations = 0
     # ========================================================================
     # STATE MACHINE
     # ========================================================================
@@ -864,13 +911,20 @@ class UpDownGame:
         logger.info("=" * 60)
 
         # Initialize report file
-        self.initialize_report()  # ← ADD THIS
+        self.initialize_report()
 
         play_second_press()
 
         # Turn on heat, turn off fan (default state)
-        await set_heat_fan_state(heat_on=True)  # ← ADD THIS
+        await set_heat_fan_state(heat_on=True)
         self.heat_on = True
+
+        # Start video recording BEFORE first round
+        logger.info(f"Starting video recording in {VIDEO_START_BEFORE_PREP} seconds...")
+        await asyncio.sleep(VIDEO_START_BEFORE_PREP)
+        logger.info("Starting initial video recording...")
+        await self.video_recorder.start_recording()
+        await asyncio.sleep(3)  # Give it time to initialize
 
         # Go to first preparation phase
         await self.enter_preparation()
@@ -933,61 +987,20 @@ class UpDownGame:
                     await self.start_extension()
 
                     # Run extension until it ends
+                    # end_extension() will handle everything and start the round
                     while self.extension_active and self.state == GameState.PREPARATION:
                         await self.run_extension()
                         await asyncio.sleep(0.1)
 
-                    # Extension complete
-                    logger.info("Extension complete - starting round")
-                    stop_white_noise()
-
-                    # Restore heat ON / fan OFF if fan was triggered during extension
-                    if self.extension_fan_triggered:
-                        await set_heat_fan_state(heat_on=True)  # ← Turns heat ON and fan OFF
-                        self.heat_on = True
-                        logger.info("→ Heat restored after extension")
-
-                    # Play extension ended
-                    extension_ended_duration = play_extension_ended()
-                    if extension_ended_duration > 0:
-                        await asyncio.sleep(extension_ended_duration + 0.3)
-                    else:
-                        await asyncio.sleep(3)
-
-                    # Turn on strobe and send vibration (same as normal prep)
-                    await all_bulbs_off()
-                    await strobe_control("on")
-                    await send_vibration()
-                    logger.info("→ Strobe and vibration activated")
-
-                    await asyncio.sleep(1.0)  # Brief pause
-
-                    # Play level audio (no round_starting, we already did prep)
-                    level_duration = 0  # Initialize default
-                    if self.current_level == 'easy':
-                        level_duration = play_easy_level()
-                    elif self.current_level == 'medium':
-                        level_duration = play_medium_level()
-                    elif self.current_level == 'hard':
-                        level_duration = play_hard_level()
-
-                    # Wait for level audio to finish
-                    if level_duration > 0:
-                        await asyncio.sleep(level_duration + 0.3)
-                    else:
-                        await asyncio.sleep(2)
-
-                    # Turn off strobe before round starts
-                    await strobe_control("off")
-                    logger.info("→ Strobe off, starting round")
-
-                    # Go directly to round (skip prep, we already did it)
-                    await self.start_round()
+                    # Extension ended - end_extension() already started the round
+                    # Just return, don't continue prep
+                    logger.info("Extension handling complete, returning from prep")
                     return
                 else:
                     # Not qualified - give feedback
                     logger.info("Button 1 pressed - Extension NOT available (not qualified)")
-                    play_extension_denied()
+
+
 
             # Check Button_2 (rapid training)
             pressed_2, self.last_button_2_value = await check_button_press(
@@ -1510,8 +1523,15 @@ class UpDownGame:
         # Start white noise
         start_white_noise()
 
+        asyncio.create_task(self._stop_video_after_delay())
+
         # Wait for break to end
         await self.run_break()
+
+    async def _stop_video_after_delay(self):
+        """Stop video recording after configured delay"""
+        await asyncio.sleep(VIDEO_STOP_AFTER_BREAK)
+        await self.video_recorder.stop_recording()
 
     async def run_break(self):
         """
@@ -1532,10 +1552,18 @@ class UpDownGame:
             self._last_button_2_value = initial_button_2
 
         while self.state == GameState.BREAK:
-            # If extension is active, handle it differently
+            # If extension is active, handle it
             if self.extension_active:
                 await self.run_extension()
-                continue  # Loop continues after extension
+
+                # Check if extension ended and state changed
+                if not self.extension_active and self.state != GameState.BREAK:
+                    # Extension called end_extension() which changed state to PREPARATION
+                    # end_extension() already called enter_preparation()
+                    logger.info("Extension ended, exiting break loop")
+                    return
+
+                continue
 
             # Normal break logic
             elapsed = time.time() - self.break_start_time
@@ -1575,30 +1603,37 @@ class UpDownGame:
     async def process_extension_request(self):
         """
         Process extension request from Button 1
+        - Check if qualified (failed Medium/Hard, not Easy or passed)
         - Check if time remains in pool
-        - 50% chance if time available
-        - Denied if no time or bad luck
+        - 50% chance if qualified and time available
         """
         logger.info("=" * 60)
         logger.info("EXTENSION REQUEST")
         logger.info("=" * 60)
 
-        remaining_time = TOTAL_EXTENSION_TIME_ALLOWED - self.total_extension_time_used
-        logger.info(f"Extension time remaining: {remaining_time / 3600:.2f} hours")
-
         # Increment request counter
         self.total_extension_requests += 1
         self.last_extension_request_time = time.time()
 
-        # Check if any time remains
+        # CHECK 1: Is subject qualified?
+        if not self.extension_qualified:
+            logger.info("✗ Extension DENIED - Not qualified")
+            logger.info("  (Only Medium/Hard failures qualify)")
+            logger.info(f"  Total requests: {self.total_extension_requests}")
+
+            return
+
+        # CHECK 2: Is there time remaining in pool?
+        remaining_time = TOTAL_EXTENSION_TIME_ALLOWED - self.total_extension_time_used
+        logger.info(f"Extension time remaining: {remaining_time / 3600:.2f} hours")
+
         if remaining_time <= 0:
-            # NO TIME LEFT
             logger.info("✗ Extension DENIED - No time remaining in pool")
             logger.info(f"  Total requests: {self.total_extension_requests}")
             play_extension_denied_limit()
             return
 
-        # Time available - 50% chance
+        # CHECK 3: 50% chance
         if random.random() < BREAK_EXTENSION_CHANCE:
             # GRANTED
             logger.info("✓ Extension GRANTED")
@@ -1608,10 +1643,10 @@ class UpDownGame:
             # Start extension
             await self.start_extension()
         else:
-            # DENIED (bad luck, not limit)
+            # DENIED (bad luck, not qualification or limit)
             logger.info("✗ Extension DENIED - Unlucky")
             logger.info(f"  Total requests: {self.total_extension_requests}")
-            play_extension_denied()
+
 
     async def start_extension(self):
         """
@@ -1699,8 +1734,8 @@ class UpDownGame:
         End extension period
         - Track time used
         - Restore heat/fan state
-        - Play appropriate audio
-        - Return to normal break/prep
+        - Play appropriate audio AND WAIT
+        - Different handling for BREAK extension vs PREP extension
 
         Args:
             reason: "button" (user ended) or "timeout" (4 hour limit)
@@ -1726,22 +1761,42 @@ class UpDownGame:
         # Restore heat ON / fan OFF if fan was triggered
         if self.extension_fan_triggered:
             logger.info("Restoring heat ON / fan OFF")
-            await set_heat_fan_state(heat_on=True)  # ← USE THIS! Turns fan OFF too
+            await set_heat_fan_state(heat_on=True)
             self.heat_on = True
 
-        # Play appropriate audio
+        # Play appropriate audio AND WAIT FOR IT TO FINISH
         if reason == "timeout":
-            play_extension_expired()
+            audio_duration = play_extension_expired()
         else:  # button
-            play_extension_ended()
+            audio_duration = play_extension_ended()
+
+        # Wait for audio to complete
+        if audio_duration > 0:
+            await asyncio.sleep(audio_duration + 0.3)
+        else:
+            await asyncio.sleep(2)
 
         # Reset extension state
         self.extension_active = False
         self.extension_fan_triggered = False
 
-        # Continue break from where it left off
-        # Break timer keeps running during extension
+        # Extension complete - proceed directly to round (NO prep phase)
+        logger.info("Extension complete - starting round immediately")
 
+        # Stop white noise
+        stop_white_noise()
+
+        # Start video recording
+        logger.info("Starting video recording...")
+        await self.video_recorder.start_recording()
+        await asyncio.sleep(3)
+
+        # Restore heat for round
+        await set_heat_fan_state(heat_on=True)
+        self.heat_on = True
+
+        # Go DIRECTLY to round - skip prep entirely
+        await self.start_round()
     def check_rapid_eligibility(self) -> bool:
         """
         Check if subject is eligible for rapid training (Phase 7)
@@ -1769,6 +1824,13 @@ class UpDownGame:
         """End break period"""
         logger.info("Break ending...")
         self.last_break_end_time = datetime.now()
+
+        # Start video recording FIRST
+        logger.info("Starting video recording...")
+        await self.video_recorder.start_recording()
+
+        # Give video a moment to initialize (3 seconds)
+        await asyncio.sleep(3)
 
         # Stop white noise
         stop_white_noise()

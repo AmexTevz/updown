@@ -168,36 +168,63 @@ class DeviceModel:
         }
 
     async def openDevice(self):
+        """
+        Keep trying to connect forever
+        Exponential backoff but never give up
+        """
         while True:
             try:
                 sensor_queue.set_sensor_state(self.sensor_file, SensorState.CONNECTING)
-                logger.info(f"Opening device for sensor {self.sensor_file}......")
+                logger.info(f"[{self.sensor_file}] Opening device (attempt #{self.reconnect_attempts + 1})...")
 
                 async with bleak.BleakClient(self.mac, timeout=20.0) as client:
                     self.client = client
                     self.isOpen = True
-                    self.reconnect_attempts = 0
+                    self.reconnect_attempts = 0  # Reset on successful connection
+
+                    logger.info(f"✓ [{self.sensor_file}] Connected successfully!")
+                    sensor_queue.set_sensor_state(self.sensor_file, SensorState.CONNECTED)
 
                     await self._setup_characteristics()
 
-                    while self.isOpen:
+                    # Stay connected
+                    while self.isOpen and client.is_connected:
                         await asyncio.sleep(1)
 
-            except Exception as ex:
+                    # If we get here, connection was lost
+                    logger.warning(f"⚠️ [{self.sensor_file}] Connection lost")
+                    self.isOpen = False
+
+            except bleak.BleakError as ex:
+                # Bluetooth-specific errors
                 self.isOpen = False
                 self.reconnect_attempts += 1
                 sensor_queue.set_sensor_state(self.sensor_file, SensorState.ERROR)
 
-                logger.error(f"Error with device {self.sensor_file}: {ex}")
+                logger.warning(f"✗ [{self.sensor_file}] BLE error: {ex}")
 
-                if self.reconnect_attempts >= self.max_reconnect_attempts:
-                    logger.error(f"Max reconnection attempts reached for {self.sensor_file}")
-                    break
+            except asyncio.TimeoutError:
+                # Connection timeout
+                self.isOpen = False
+                self.reconnect_attempts += 1
+                sensor_queue.set_sensor_state(self.sensor_file, SensorState.ERROR)
 
-                # Exponential backoff for reconnection
-                wait_time = min(30, 2 ** self.reconnect_attempts)
-                logger.info(f"Attempting reconnection in {wait_time} seconds...")
-                await asyncio.sleep(wait_time)
+                logger.warning(f"✗ [{self.sensor_file}] Connection timeout")
+
+            except Exception as ex:
+                # Other errors
+                self.isOpen = False
+                self.reconnect_attempts += 1
+                sensor_queue.set_sensor_state(self.sensor_file, SensorState.ERROR)
+
+                logger.error(f"✗ [{self.sensor_file}] Unexpected error: {ex}")
+
+            # Exponential backoff (cap at 30 seconds)
+            wait_time = min(30, 2 ** min(self.reconnect_attempts, 5))
+            logger.info(f"[{self.sensor_file}] Retrying in {wait_time} seconds...")
+            await asyncio.sleep(wait_time)
+
+            # NEVER BREAK - keep trying forever
 
     async def _setup_characteristics(self):
         target_service_uuid = self.uuids['service']
@@ -426,13 +453,29 @@ async def main():
                         # Check if we already have a connection task for this device
                         if device.address in active_connections:
                             task = active_connections[device.address]
+
                             # Check if task is still running
                             if not task.done():
-                                # Still connected/connecting, skip
-                                continue
+                                # Task running - check if sensor is actually connected
+                                state = sensor_queue.get_sensor_state(sensor_file)
+
+                                if state == SensorState.CONNECTED:
+                                    # All good, skip
+                                    continue
+                                else:
+                                    # Task running but sensor not connected (connecting/error)
+                                    # Let it keep trying, skip for now
+                                    continue
                             else:
-                                # Task completed (disconnected), remove it
-                                logger.info(f"Previous connection to {sensor_file} ended, reconnecting...")
+                                # Task completed/crashed - restart it
+                                logger.warning(f"[{sensor_file}] Connection task ended, restarting...")
+
+                                # Check if task had an exception
+                                try:
+                                    task.result()
+                                except Exception as e:
+                                    logger.error(f"[{sensor_file}] Task exception: {e}")
+
                                 del active_connections[device.address]
 
                         # Start new connection task
