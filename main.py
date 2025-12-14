@@ -171,8 +171,10 @@ async def sensor_calibration_mode():
     last_was_up = False
 
     # State machine
+    # State machine
     waiting_for_first = True
     waiting_for_second = False
+    waiting_for_third = False
     second_press_deadline = 0
 
     # Print timing
@@ -210,7 +212,6 @@ async def sensor_calibration_mode():
                 # Check DOWN threshold (blink Bulb_1)
                 is_down = active_angle < ANGLE_DOWN_THRESHOLD
                 if is_down and not last_was_down:
-                    # Just crossed into down
                     logger.info(f"✓ DOWN threshold crossed ({active_angle:.1f}°) - Bulb 1 blink")
                     await bulb_1_control("off")
                     await asyncio.sleep(0.3)
@@ -220,7 +221,6 @@ async def sensor_calibration_mode():
                 # Check UP threshold (blink Bulb_2)
                 is_up = active_angle > ANGLE_UP_THRESHOLD
                 if is_up and not last_was_up:
-                    # Just crossed into up
                     logger.info(f"✓ UP threshold crossed ({active_angle:.1f}°) - Bulb 2 blink")
                     await bulb_2_control("off")
                     await asyncio.sleep(0.3)
@@ -240,7 +240,6 @@ async def sensor_calibration_mode():
                     button_pressed = True
                     button_name = "Button 1"
                     logger.debug(f"Button 1: {last_button_1_value} → {current_button_1}")
-                    last_button_1_value = current_button_1
 
             # Check Button 2
             if current_button_2 is not None and last_button_2_value is not None:
@@ -248,37 +247,120 @@ async def sensor_calibration_mode():
                     button_pressed = True
                     button_name = "Button 2"
                     logger.debug(f"Button 2: {last_button_2_value} → {current_button_2}")
-                    last_button_2_value = current_button_2
 
-            # Update last values (even if None - keep trying)
+            # Update last values
             if current_button_1 is not None:
                 last_button_1_value = current_button_1
             if current_button_2 is not None:
                 last_button_2_value = current_button_2
 
-            # State machine logic
+            # ===================================================================
+            # STATE MACHINE: THREE BUTTON PRESSES
+            # ===================================================================
             if button_pressed:
                 if waiting_for_first:
-                    # First button press
+                    # ============ FIRST PRESS: PLAY INTRO (SKIPPABLE) ============
                     logger.info("")
                     logger.info("=" * 70)
-                    logger.info(f"{button_name} pressed! (1/2)")
-                    logger.info("Press again within 10 seconds to confirm")
+                    logger.info(f"{button_name} pressed! (1/3)")
+                    logger.info("PLAYING INTRO AUDIO...")
+                    logger.info("Press button again to skip")
                     logger.info("=" * 70)
                     logger.info("")
 
-                    play_first_press()
+                    # Play intro audio and wait for it to finish (or skip)
+                    from audio import play_intro_audio
+                    intro_duration = play_intro_audio()
+
+                    intro_skipped = False
+
+                    if intro_duration > 0:
+                        logger.info(f"Intro playing ({intro_duration:.1f} seconds)...")
+
+                        # Wait for intro to finish, but check for button presses to skip
+                        elapsed = 0
+                        check_interval = 0.1  # Check every 100ms
+
+                        while elapsed < intro_duration + 0.5:
+                            # Check for button press to skip
+                            check_button_1 = await read_button(BUTTON_1)
+                            check_button_2 = await read_button(BUTTON_2)
+
+                            skip_pressed = False
+
+                            # Check if either button was pressed (rising edge detection)
+                            if check_button_1 is not None and last_button_1_value is not None:
+                                if check_button_1 > last_button_1_value:
+                                    skip_pressed = True
+                                    logger.info("✓ Button 1 pressed - SKIPPING INTRO")
+
+                            if check_button_2 is not None and last_button_2_value is not None:
+                                if check_button_2 > last_button_2_value:
+                                    skip_pressed = True
+                                    logger.info("✓ Button 2 pressed - SKIPPING INTRO")
+
+                            # Update last values BEFORE checking skip
+                            if check_button_1 is not None:
+                                last_button_1_value = check_button_1
+                            if check_button_2 is not None:
+                                last_button_2_value = check_button_2
+
+                            if skip_pressed:
+                                # Stop the audio
+                                import pygame
+                                pygame.mixer.stop()
+                                intro_skipped = True
+                                logger.info("Intro audio stopped")
+
+                                # CRITICAL: Re-read buttons after a delay to prevent double-detection
+                                await asyncio.sleep(0.3)
+                                last_button_1_value = await read_button(BUTTON_1)
+                                last_button_2_value = await read_button(BUTTON_2)
+
+                                break
+
+                            # Sleep for check interval
+                            await asyncio.sleep(check_interval)
+                            elapsed += check_interval
+                    else:
+                        logger.warning("No intro played - continuing")
+                        await asyncio.sleep(2)
+
+                    logger.info("")
+                    if intro_skipped:
+                        logger.info("Intro skipped - press button to confirm calibration")
+                    else:
+                        logger.info("Intro finished - press button within 10 seconds to confirm")
+                    logger.info("")
 
                     waiting_for_first = False
                     waiting_for_second = True
                     second_press_deadline = asyncio.get_event_loop().time() + 10
 
                 elif waiting_for_second:
-                    # Second button press - exit calibration
+                    # ============ SECOND PRESS: CONFIRMATION ============
                     logger.info("")
                     logger.info("=" * 70)
-                    logger.info(f"{button_name} pressed! (2/2)")
-                    logger.info("Starting game...")
+                    logger.info(f"{button_name} pressed! (2/3)")
+                    logger.info("Calibration confirmed")
+                    logger.info("=" * 70)
+                    logger.info("")
+
+                    play_first_press()  # Confirmation beep
+
+                    logger.info("")
+                    logger.info("Press button ONE MORE TIME to start game...")
+                    logger.info("")
+
+                    waiting_for_second = False
+                    waiting_for_third = True
+
+                elif waiting_for_third:
+                    # ============ THIRD PRESS: START GAME ============
+                    logger.info("")
+                    logger.info("=" * 70)
+                    logger.info(f"{button_name} pressed! (3/3)")
+                    logger.info("STARTING GAME")
                     logger.info("=" * 70)
                     logger.info("")
 
@@ -299,6 +381,7 @@ async def sensor_calibration_mode():
                     # Reset to waiting for first press
                     waiting_for_first = True
                     waiting_for_second = False
+                    waiting_for_third = False
 
             await asyncio.sleep(0.1)  # 10Hz update
 

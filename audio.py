@@ -14,7 +14,7 @@ except:
     AUDIO_AVAILABLE = False
 
 from config import AUDIO_BASE_PATH, AUDIO_VOLUME
-
+AUDIO_DIR = Path(__file__).parent / 'audio'
 logger = logging.getLogger(__name__)
 
 
@@ -384,3 +384,49 @@ def play_extension_expired() -> float:
 def set_audio_volume(volume: float):
     """Set global audio volume (0.0 to 1.0)"""
     audio_manager.set_volume(volume)
+
+
+def play_intro_audio() -> float:
+    """
+    Play intro audio from intro folder
+    Returns: Duration of the audio in seconds
+    """
+    if not audio_manager.audio_available:
+        logger.info("[AUDIO] Intro audio (pygame not available)")
+        return 0.0
+
+    intro_folder = AUDIO_DIR / 'intro'
+
+    if not intro_folder.exists():
+        logger.warning(f"Intro folder not found: {intro_folder}")
+        return 0.0
+
+    # Get all audio files from intro folder
+    audio_files = list(intro_folder.glob("*.wav")) + list(intro_folder.glob("*.mp3"))
+
+    if not audio_files:
+        logger.warning("No audio files found in intro folder")
+        return 0.0
+
+    try:
+        # Use first audio file (sorted alphabetically)
+        intro_file = sorted(audio_files)[0]
+
+        logger.info(f"[AUDIO] Playing intro: {intro_file.name}")
+
+        # Stop any currently playing audio
+        pygame.mixer.stop()
+
+        # Load and play with current volume
+        sound = pygame.mixer.Sound(str(intro_file))
+        sound.set_volume(audio_manager.current_volume)
+        sound.play()
+
+        # Get and return duration
+        duration = sound.get_length()
+        logger.info(f"[AUDIO] Intro duration: {duration:.2f}s")
+        return duration
+
+    except Exception as e:
+        logger.error(f"[AUDIO] Failed to play intro: {e}")
+        return 0.0

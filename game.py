@@ -11,9 +11,6 @@ import time
 import logging
 from datetime import datetime, timedelta
 from enum import Enum
-from typing import Optional
-
-# Import our modules
 from config import *
 from hardware import *
 from audio import *
@@ -146,6 +143,9 @@ class UpDownGame:
         self.both_sensors_were_lost = False
         self.round_number = 0
         self.pose_changes_this_round = 0
+        self.is_very_first_round = True  # Track first round ever (no extension on first)
+        self.cycle_has_failure = False  # Track if any failure in current cycle
+        self.current_round_violation_limit = 0  # Random limit for current round
         self.violations_this_round = []  # List of {type, start_time, correction_time}
         self.peak_consecutive_violations = 0
         self.round_time_credited = 0  # Actual credited time (completed holds only)
@@ -166,6 +166,43 @@ class UpDownGame:
         self.last_void_shock_count = 0
         self.last_void_shock_times = []
         self.video_recorder = VideoRecorder(enabled=VIDEO_RECORDING_ENABLED)
+        # ============ NEW: Enhanced Statistics Tracking ============
+        # Position-specific statistics
+        self.up_positions_commanded = 0
+        self.down_positions_commanded = 0
+        self.up_positions_achieved = 0
+        self.down_positions_achieved = 0
+        self.up_total_hold_time = 0.0  # Successful hold time
+        self.down_total_hold_time = 0.0
+
+        # Violation details by position
+        self.up_violations_count = 0
+        self.down_violations_count = 0
+        self.up_transition_violations = 0
+        self.down_transition_violations = 0
+        self.up_hold_violations = 0
+        self.down_hold_violations = 0
+
+        # Correction time tracking
+        self.up_correction_times = []
+        self.down_correction_times = []
+
+        # Hold duration before violation (how long held before losing it)
+        self.up_hold_before_violation = []
+        self.down_hold_before_violation = []
+
+        # Round performance history
+        self.round_history = []
+
+        # Session timing
+        self.session_start = None
+        self.session_end = None
+        self.total_break_time = 0.0
+        self.total_extension_time_actual = 0.0  # Actual time in extensions
+        self.total_void_time = 0.0
+        self.total_shock_count = 0
+        # ============ END NEW TRACKING ============
+
 
         logger.info("=" * 60)
         logger.info("UP/DOWN TRAINING GAME - PHASE 1")
@@ -254,6 +291,7 @@ class UpDownGame:
                 # Use saved level (level that was actually played)
                 played_level = getattr(self, '_last_round_level', self.current_level)
                 f.write(f"Level: {played_level.upper()}\n")
+                f.write(f"Violation Limit: {self.current_round_violation_limit}\n")  # ← ADD THIS
                 f.write(
                     f"Duration: {self.current_round_duration} seconds ({self.current_round_duration / 60:.1f} minutes)\n")
                 f.write(f"Pose Changes: {self.pose_changes_this_round}\n")
@@ -532,6 +570,18 @@ class UpDownGame:
 
     async def command_position(self, position: str, is_rapid: bool = False):
         """Command subject to take position"""
+
+        # ============ NEW: Track command ============
+        if position == 'down':
+            self.down_positions_commanded += 1
+        else:
+            self.up_positions_commanded += 1
+        # ============ END NEW ============
+
+        logger.info("=" * 60)
+        logger.info(f"COMMAND: {position.upper()} {'(RAPID)' if is_rapid else ''}")
+        # ... rest of existing code
+
         logger.info("=" * 60)
         logger.info(f"COMMAND: {position.upper()} {'(RAPID)' if is_rapid else ''}")
         logger.info("=" * 60)
@@ -674,6 +724,8 @@ class UpDownGame:
         # Reset level to Easy (void penalty)
         self.current_level = 'easy'
         logger.info("Level reset to EASY due to void")
+        self.cycle_has_failure = False
+        logger.debug("Cycle reset due to void")
         # Resume to preparation
         await self.enter_preparation()
     async def monitor_position_achievement(self, position: str, bulb_control, is_rapid: bool, transition_time: float = 7.0):
@@ -695,6 +747,14 @@ class UpDownGame:
             # Check if position achieved
             if not self.position_achieved and self.check_position_correct(position):
                 self.position_achieved = True
+
+                # ============ NEW: Track achievement ============
+                if position == 'down':
+                    self.down_positions_achieved += 1
+                else:
+                    self.up_positions_achieved += 1
+                # ============ END NEW ============
+
                 logger.info(f"Position {position.upper()} achieved at {elapsed:.1f}s")
 
                 # Reset consecutive violation counter (position achieved)
@@ -729,11 +789,21 @@ class UpDownGame:
                     self.peak_consecutive_violations = self.consecutive_violations
 
                 violation_start = time.time()
-                self.violations_this_round.append({
+                violation_record = {
                     'type': 'transition',
+                    'position': position,  # ← ADD THIS
                     'start_time': violation_start,
-                    'correction_time': 0  # Will be updated when corrected
-                })
+                    'correction_time': 0
+                }
+                self.violations_this_round.append(violation_record)
+
+                # ============ NEW: Track by position ============
+                if position == 'down':
+                    self.down_violations_count += 1
+                    self.down_transition_violations += 1
+                else:
+                    self.up_violations_count += 1
+                    self.up_transition_violations += 1
 
                 # FIXED ORDER: Shock BEFORE audio
                 asyncio.create_task(send_pishock(mode=PISHOCK_MODE_SHOCK))
@@ -746,7 +816,7 @@ class UpDownGame:
 
                 # Check for 10-in-a-row void condition
                 if self.consecutive_violations >= MAX_PISHOCK_CYCLES:
-                    logger.error("10 consecutive violations - VOIDING ROUND")
+                    logger.error("7 consecutive violations - VOIDING ROUND")
                     play_ten_in_row()
                     await self.void_round()
                     return
@@ -808,96 +878,81 @@ class UpDownGame:
 
     def apply_round_result(self, passed: bool):
         """
-        Apply round completion results - simplified version
-        - Credits round time always
-        - Awards 20 min bonus only on Hard pass
-        - No penalties to training time
+        Apply round completion results - Mystery System
+        - Always progress through cycle (no early reset)
+        - Track failures internally
+        - Award bonus only if entire cycle is clean
         """
         self._last_round_passed = passed
-        self._last_round_level = self.current_level  # Save level BEFORE advancing
-        config = self.get_level_config()
+        self._last_round_level = self.current_level  # Save BEFORE changing
 
         # ALWAYS credit round time (unless voided)
         if not self.void_occurred:
             self.completed_training_time += self.current_round_duration
             logger.info(f"Round time credited: {self.current_round_duration / 60:.1f} min")
 
-        if passed:
-            logger.info(f"✓ ROUND PASSED!")
-            logger.info(f"  Violations: {self.round_violations}/{config['violation_limit']}")
+        # Log result (hidden from subject)
+        logger.info(f"Round complete")
+        logger.debug(
+            f"Result: {'PASSED' if passed else 'FAILED'} (violations: {self.round_violations}/{self.current_round_violation_limit})")
 
-            # Advance level
-            if self.current_level == 'easy':
-                self.current_level = 'medium'
-                logger.info("  → Next level: MEDIUM")
-                self.extension_qualified = False
+        # Track failure for cycle bonus
+        if not passed:
+            self.cycle_has_failure = True
+            logger.debug("Cycle failure recorded (no bonus will be awarded)")
 
-            elif self.current_level == 'medium':
-                self.current_level = 'hard'
-                logger.info("  → Next level: HARD")
-                self.extension_qualified = False
+        # ALWAYS PROGRESS - Never reset to Easy early
+        if self.current_level == 'easy':
+            self.current_level = 'medium'
+            logger.debug("Progressing to MEDIUM")
+
+        elif self.current_level == 'medium':
+            self.current_level = 'hard'
+            logger.debug("Progressing to HARD")
 
 
-            elif self.current_level == 'hard':
+        elif self.current_level == 'hard':
 
-                # CYCLE COMPLETE! Award 20 min bonus
+            # CYCLE COMPLETE
+
+            logger.debug("Cycle complete!")
+
+            # Award bonus only if NO failures in cycle
+
+            if not self.cycle_has_failure:
 
                 self.completed_training_time += CYCLE_COMPLETION_BONUS
 
-                logger.info(f"  ★ CYCLE COMPLETE! Bonus: {CYCLE_COMPLETION_BONUS / 60} min")
-
-                self.current_level = 'easy'
-
-                logger.info("  → Next level: EASY (new cycle)")
-
-                logger.info("  No extension after cycle completion")
-
-                self.extension_qualified = False  # SUCCESS doesn't grant mercy
-
-        else:  # Failed
-
-            logger.warning(f"✗ ROUND FAILED!")
-
-            logger.warning(f"  Violations: {self.round_violations} (limit: {config['violation_limit']})")
-
-            # Save current level BEFORE resetting (important!)
-
-            failed_level = self.current_level
-
-            logger.warning(f"  Restarting from EASY level")
-
-            # Back to Easy
-
-            self.current_level = 'easy'
-
-            # Extension qualification: Medium/Hard failures only (not Easy, not Void)
-
-            if not self.void_occurred:
-
-                if failed_level in ['medium', 'hard']:
-
-                    self.extension_qualified = True
-
-                    logger.info(f"  Break extension qualified (failed {failed_level.upper()} level)")
-
-                else:  # failed Easy
-
-                    self.extension_qualified = False
-
-                    logger.info("  No extension (Easy failure - must push through)")
+                logger.debug(f"✓ Clean cycle! Bonus awarded: {CYCLE_COMPLETION_BONUS / 60} min")
 
             else:
 
-                self.extension_qualified = False
+                # Apply penalty for failed cycle
 
-                logger.warning("  NO extension allowed (round voided)")
+                self.penalty_time_added += CYCLE_FAILURE_PENALTY
 
-            # Reset round violation counter
+                logger.debug(f"✗ Cycle had failure(s) - Penalty applied: {CYCLE_FAILURE_PENALTY / 60} min")
 
-            self.round_violations = 0
-    # ========================================================================
-    # STATE MACHINE
-    # ========================================================================
+                logger.debug(f"   New training goal: {self.current_training_goal / 60:.1f} min")
+
+            # Reset to Easy for new cycle
+
+            self.current_level = 'easy'
+
+            # Reset cycle failure tracker
+
+            self.cycle_has_failure = False
+
+            logger.debug("New cycle starting")
+        # Reset round violation counter
+        self.round_violations = 0
+
+        # Extension qualification: Only after Hard round
+        if self._last_round_level == 'hard':
+            self.extension_qualified = True
+            logger.debug("Extension available (completed Hard round)")
+        else:
+            self.extension_qualified = False
 
     async def start_game(self):
         """Initialize and start the game"""
@@ -913,11 +968,10 @@ class UpDownGame:
         # Initialize report file
         self.initialize_report()
 
-        play_second_press()
+        # Note: play_second_press() already called in main.py calibration
 
         # Turn on heat, turn off fan (default state)
         await set_heat_fan_state(heat_on=True)
-        self.heat_on = True
 
         # Start video recording BEFORE first round
         logger.info(f"Starting video recording in {VIDEO_START_BEFORE_PREP} seconds...")
@@ -998,9 +1052,7 @@ class UpDownGame:
                     return
                 else:
                     # Not qualified - give feedback
-                    logger.info("Button 1 pressed - Extension NOT available (not qualified)")
-
-
+                    logger.debug("Button 1 pressed - Not qualified or first round (silent)")
 
             # Check Button_2 (rapid training)
             pressed_2, self.last_button_2_value = await check_button_press(
@@ -1027,6 +1079,17 @@ class UpDownGame:
         # Increment round counter
         self.round_number += 1
 
+        # Randomize violation limit for THIS round only
+        self.current_round_violation_limit = random.randint(
+            VIOLATION_LIMIT_MIN,
+            VIOLATION_LIMIT_MAX
+        )
+
+        # Clear first round flag after starting
+        if self.is_very_first_round:
+            self.is_very_first_round = False
+            logger.debug("First round started - extensions available after first Hard completion")
+
         # Reset round statistics
         self.pose_changes_this_round = 0
         self.violations_this_round = []
@@ -1037,6 +1100,7 @@ class UpDownGame:
         logger.info("=" * 60)
         logger.info(f"ROUND {self.round_number} STARTED - Duration: {self.current_round_duration} seconds")
         logger.info("=" * 60)
+        logger.debug(f"Violation limit: {self.current_round_violation_limit} (hidden from subject)")
         set_audio_volume(0.8)
 
         # Ensure heat ON, fan OFF at start of every round
@@ -1469,8 +1533,7 @@ class UpDownGame:
         await send_vibration()
 
         # Determine pass/fail
-        config = self.get_level_config()
-        passed = self.round_violations < config['violation_limit']
+        passed = self.round_violations < self.current_round_violation_limit
 
         # Apply results
         self.apply_round_result(passed)
@@ -1511,14 +1574,7 @@ class UpDownGame:
         logger.info("→ Mode: HEAT OFF / FAN OFF (regular break)")
         # Wait for round_over audio to finish before playing status
         if round_over_duration > 0:
-            await asyncio.sleep(round_over_duration + 0.3)  # Add 0.3s buffer
-
-        # Play round status audio (passed or failed)
-        if hasattr(self, '_last_round_passed'):
-            if self._last_round_passed:
-                play_round_passed()
-            else:
-                play_round_failed()
+            await asyncio.sleep(round_over_duration + 0.3)
 
         # Start white noise
         start_white_noise()
@@ -1603,24 +1659,21 @@ class UpDownGame:
     async def process_extension_request(self):
         """
         Process extension request from Button 1
-        - Check if qualified (failed Medium/Hard, not Easy or passed)
-        - Check if time remains in pool
-        - 50% chance if qualified and time available
+        - Check if qualified (after Hard round)
+        - Check if time remaining in pool
+        - Always grant if both conditions met (no 50% chance)
         """
         logger.info("=" * 60)
         logger.info("EXTENSION REQUEST")
         logger.info("=" * 60)
 
-        # Increment request counter
         self.total_extension_requests += 1
         self.last_extension_request_time = time.time()
 
         # CHECK 1: Is subject qualified?
         if not self.extension_qualified:
-            logger.info("✗ Extension DENIED - Not qualified")
-            logger.info("  (Only Medium/Hard failures qualify)")
-            logger.info(f"  Total requests: {self.total_extension_requests}")
-
+            logger.debug("Extension request - Not qualified (silent)")
+            # SILENT - no response to subject
             return
 
         # CHECK 2: Is there time remaining in pool?
@@ -1633,19 +1686,13 @@ class UpDownGame:
             play_extension_denied_limit()
             return
 
-        # CHECK 3: 50% chance
-        if random.random() < BREAK_EXTENSION_CHANCE:
-            # GRANTED
-            logger.info("✓ Extension GRANTED")
-            logger.info(f"  Total requests: {self.total_extension_requests}")
-            play_extension_granted()
+        # QUALIFIED AND TIME AVAILABLE - ALWAYS GRANT
+        logger.info("✓ Extension GRANTED")
+        logger.info(f"  Total requests: {self.total_extension_requests}")
+        play_extension_granted()
 
-            # Start extension
-            await self.start_extension()
-        else:
-            # DENIED (bad luck, not qualification or limit)
-            logger.info("✗ Extension DENIED - Unlucky")
-            logger.info(f"  Total requests: {self.total_extension_requests}")
+        # Start extension
+        await self.start_extension()
 
 
     async def start_extension(self):
@@ -1735,7 +1782,7 @@ class UpDownGame:
         - Track time used
         - Restore heat/fan state
         - Play appropriate audio AND WAIT
-        - Different handling for BREAK extension vs PREP extension
+        - Go directly to round start (no prep phase)
 
         Args:
             reason: "button" (user ended) or "timeout" (4 hour limit)

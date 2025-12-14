@@ -33,7 +33,7 @@ PISHOCK_INTENSITY_MIN = 60
 PISHOCK_INTENSITY_MAX = 100
 PISHOCK_DURATION_MIN = 1
 PISHOCK_DURATION_MAX = 2
-MAX_PISHOCK_CYCLES = 8
+MAX_PISHOCK_CYCLES = 7
 AUDIO_BASE_PATH = "audio"
 AUDIO_VOLUME = 0.8
 
@@ -47,13 +47,13 @@ VOID_SHOCK_INTERVAL_MAX = 30
 # ============================================================================
 GAME_DURATION_HOURS = 10
 
-TRAINING_TIME_MIN = 120 * 60
-TRAINING_TIME_MAX = 180 * 60
+TRAINING_TIME_MIN = 140 * 60
+TRAINING_TIME_MAX = 200 * 60
 
 ROUND_DURATION_MIN = 3 * 60
 ROUND_DURATION_MAX = 6 * 60
 
-BREAK_EXTENSION_CHANCE = 1.0                    # 50% chance of approval
+
 TOTAL_EXTENSION_TIME_ALLOWED = 4 * 3600        # 5 hours total pool
 EXTENSION_REQUEST_COOLDOWN = 25                 # 15 seconds between requests
 EXTENSION_FAN_ACTIVATION_MIN = 15 * 60          # 15 minutes
@@ -140,28 +140,26 @@ HARDWARE_MONITOR_INTERVAL = 10  # Check every 10 seconds for reconnection
 VIDEO_RECORDING_ENABLED = True  # Set to False to disable
 VIDEO_START_BEFORE_PREP = 10    # Seconds before prep to start
 VIDEO_STOP_AFTER_BREAK = 10     # Seconds after break to stop
-
+VIOLATION_LIMIT_MIN = 3
+VIOLATION_LIMIT_MAX = 10
 LEVEL_CONFIG = {
     'easy': {
         'round_duration': (18, 30),      # 3-5 minutes
         'transition_time': (10, 12),        # 8-12 seconds random per command
         'hold_time_up': (3, 8),            # 3-9 seconds
         'hold_time_down': (12, 16),         # 6-18 seconds
-        'violation_limit': 8               # Less than 6 to pass
     },
     'medium': {
         'round_duration': (24, 36),      # 4-6 minutes
         'transition_time': (8, 10),        # 6-10 seconds
         'hold_time_up': (7, 12),           # 6-15 seconds
         'hold_time_down': (8, 12),         # 5-12 seconds
-        'violation_limit': 6               # Less than 4 to pass
     },
     'hard': {
         'round_duration': (30, 42),      # 5-7 minutes
         'transition_time': (6, 8),         # 5-8 seconds
         'hold_time_up': (11, 16),          # 10-20 seconds
         'hold_time_down': (4, 8),         # 3-10 seconds
-        'violation_limit': 4               # Less than 2 to pass
     }
 }
 
@@ -186,3 +184,5 @@ if TESTING_MODE:
     PREPARATION_WINDOW = 20
     VOID_BREAK_DURATION = 30
     SENSOR_PATIENCE_TIME = 2 * 60  # 2 minutes in testing mode
+    CYCLE_FAILURE_PENALTY = 10 * 60  # 10 minutes added to training goal
+
