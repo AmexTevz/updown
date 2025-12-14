@@ -47,8 +47,8 @@ VOID_SHOCK_INTERVAL_MAX = 30
 # ============================================================================
 GAME_DURATION_HOURS = 10
 
-TRAINING_TIME_MIN = 140 * 60
-TRAINING_TIME_MAX = 200 * 60
+TRAINING_TIME_MIN = 5 * 60
+TRAINING_TIME_MAX = 8 * 60 #------------
 
 ROUND_DURATION_MIN = 3 * 60
 ROUND_DURATION_MAX = 6 * 60
@@ -88,6 +88,7 @@ RAPID_SUSPENSE_WAIT = 3 * 60
 
 BREAK_DURATION_MIN = 30  # 2 minutes ------------------
 BREAK_DURATION_MAX = 45  # 4 minutes -----------------
+CYCLE_FAILURE_PENALTY = 10 * 60  # 10 minutes added to training goal
 
 
 # Pre-game wait time (after button confirmation)
@@ -144,22 +145,22 @@ VIOLATION_LIMIT_MIN = 3
 VIOLATION_LIMIT_MAX = 10
 LEVEL_CONFIG = {
     'easy': {
-        'round_duration': (18, 30),      # 3-5 minutes
+        'round_duration': (120, 200),      # 3-5 minutes---------
         'transition_time': (10, 12),        # 8-12 seconds random per command
         'hold_time_up': (3, 8),            # 3-9 seconds
         'hold_time_down': (12, 16),         # 6-18 seconds
     },
     'medium': {
-        'round_duration': (24, 36),      # 4-6 minutes
+        'round_duration': (200, 220),      # 4-6 minutes----------
         'transition_time': (8, 10),        # 6-10 seconds
         'hold_time_up': (7, 12),           # 6-15 seconds
         'hold_time_down': (8, 12),         # 5-12 seconds
     },
     'hard': {
-        'round_duration': (30, 42),      # 5-7 minutes
-        'transition_time': (6, 8),         # 5-8 seconds
+        'round_duration': (200, 220),      # 5-7 minutes-----------
+        'transition_time': (5, 8),         # 5-8 seconds
         'hold_time_up': (11, 16),          # 10-20 seconds
-        'hold_time_down': (4, 8),         # 3-10 seconds
+        'hold_time_down': (3, 6),         # 3-10 seconds
     }
 }
 

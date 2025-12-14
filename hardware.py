@@ -363,23 +363,65 @@ async def emergency_shutdown():
 
 async def game_end_sequence():
     """
-    Normal game end - activate plug and turn all lights ON (not flashing)
-    Keep them on indefinitely
+    Normal game end sequence:
+    1. Turn on all bulbs AND play audio simultaneously
+    2. Wait 3-5 minutes (random)
+    3. Then activate plug
+    4. Keep everything on indefinitely
     """
-    logger.info("GAME END SEQUENCE")
+    from audio import play_training_ended  # ← ADD THIS IMPORT
 
+    logger.info("=" * 60)
+    logger.info("GAME END SEQUENCE")
+    logger.info("=" * 60)
+
+    # Step 1: Turn on all bulbs AND play audio simultaneously
+    try:
+        await all_bulbs_on()
+        logger.info("✓ All bulbs turned ON")
+    except Exception as e:
+        logger.error(f"Failed to turn on bulbs: {e}")
+
+    # Play audio (non-blocking, happens simultaneously with bulbs)
+    play_training_ended()  # ← ADD THIS
+    logger.info("✓ Training ended audio playing")
+
+    # Step 2: Wait 3-5 minutes before plug activation
+    import random
+    wait_time = random.randint(3 * 60, 5 * 60)  # 180-300 seconds
+    logger.info(f"Waiting {wait_time} seconds ({wait_time / 60:.1f} minutes) before plug activation...")
+
+    # Wait in 10-second intervals
+    elapsed = 0
+    while elapsed < wait_time:
+        await asyncio.sleep(10)
+        elapsed += 10
+
+        # Log progress every minute
+        if elapsed % 60 == 0:
+            remaining = (wait_time - elapsed) / 60
+            logger.info(f"  {remaining:.1f} minutes until plug activation...")
+
+    # Step 3: Activate plug
+    logger.info("Activating plug...")
+    try:
+        await plug_control("on")
+        logger.info("✓ Plug activated")
+    except Exception as e:
+        logger.error(f"Failed to activate plug: {e}")
+
+    logger.info("Game end sequence complete - maintaining state")
+    logger.info("=" * 60)
+
+    # Step 4: Keep everything on indefinitely
     while True:
         try:
             await plug_control("on")
             await all_bulbs_on()
-            await asyncio.sleep(10)
+            await asyncio.sleep(30)
         except Exception as e:
-            logger.error(f"Game end sequence error: {e}")
+            logger.error(f"Game end maintenance error: {e}")
             await asyncio.sleep(5)
-
-# ============================================================================
-# HARDWARE TEST
-# ============================================================================
 
 async def test_all_hardware():
     """Test all hardware"""

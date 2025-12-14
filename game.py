@@ -3,6 +3,8 @@ Up/Down Training Game - Phase 1: Core Infrastructure
 
 Main game logic with complete position management and bulb control
 Includes continuous hardware monitoring and sensor reconnection
+
+ENHANCED VERSION with comprehensive statistics tracking
 """
 
 import asyncio
@@ -11,6 +13,9 @@ import time
 import logging
 from datetime import datetime, timedelta
 from enum import Enum
+from typing import Optional
+
+# Import our modules
 from config import *
 from hardware import *
 from audio import *
@@ -166,6 +171,7 @@ class UpDownGame:
         self.last_void_shock_count = 0
         self.last_void_shock_times = []
         self.video_recorder = VideoRecorder(enabled=VIDEO_RECORDING_ENABLED)
+
         # ============ NEW: Enhanced Statistics Tracking ============
         # Position-specific statistics
         self.up_positions_commanded = 0
@@ -201,8 +207,10 @@ class UpDownGame:
         self.total_extension_time_actual = 0.0  # Actual time in extensions
         self.total_void_time = 0.0
         self.total_shock_count = 0
-        # ============ END NEW TRACKING ============
 
+        # Break tracking helper
+        self._current_break_start_absolute = 0
+        # ============ END NEW TRACKING ============
 
         logger.info("=" * 60)
         logger.info("UP/DOWN TRAINING GAME - PHASE 1")
@@ -210,6 +218,305 @@ class UpDownGame:
         logger.info(f"Training goal: {self.training_goal / 60:.1f} minutes")
         logger.info(f"Sensor patience: {SENSOR_PATIENCE_TIME / 3600:.1f} hours")
         logger.info(f"Testing mode: {'YES' if TESTING_MODE else 'NO'}")
+
+    # ========================================================================
+    # STATISTICS CALCULATION & REPORTING
+    # ========================================================================
+
+    def calculate_statistics(self):
+        """Calculate all statistics for reporting"""
+        stats: dict[str, float] = {}
+
+        # Position success rates
+        stats['up_success_rate'] = (self.up_positions_achieved / self.up_positions_commanded * 100) if self.up_positions_commanded > 0 else 0
+        stats['down_success_rate'] = (self.down_positions_achieved / self.down_positions_commanded * 100) if self.down_positions_commanded > 0 else 0
+
+        # Correction times - UP
+        if self.up_correction_times:
+            stats['up_correction_fastest'] = min(self.up_correction_times)
+            stats['up_correction_slowest'] = max(self.up_correction_times)
+            stats['up_correction_average'] = sum(self.up_correction_times) / len(self.up_correction_times)
+            stats['up_correction_median'] = sorted(self.up_correction_times)[len(self.up_correction_times) // 2]
+        else:
+            stats['up_correction_fastest'] = 0
+            stats['up_correction_slowest'] = 0
+            stats['up_correction_average'] = 0
+            stats['up_correction_median'] = 0
+
+        # Correction times - DOWN
+        if self.down_correction_times:
+            stats['down_correction_fastest'] = min(self.down_correction_times)
+            stats['down_correction_slowest'] = max(self.down_correction_times)
+            stats['down_correction_average'] = sum(self.down_correction_times) / len(self.down_correction_times)
+            stats['down_correction_median'] = sorted(self.down_correction_times)[len(self.down_correction_times) // 2]
+        else:
+            stats['down_correction_fastest'] = 0
+            stats['down_correction_slowest'] = 0
+            stats['down_correction_average'] = 0
+            stats['down_correction_median'] = 0
+
+        # Hold before violation - UP
+        if self.up_hold_before_violation:
+            stats['up_hold_before_violation_avg'] = sum(self.up_hold_before_violation) / len(self.up_hold_before_violation)
+        else:
+            stats['up_hold_before_violation_avg'] = 0
+
+        # Hold before violation - DOWN
+        if self.down_hold_before_violation:
+            stats['down_hold_before_violation_avg'] = sum(self.down_hold_before_violation) / len(self.down_hold_before_violation)
+        else:
+            stats['down_hold_before_violation_avg'] = 0
+
+        # Average hold time (successful)
+        if self.up_positions_achieved > 0:
+            stats['up_avg_hold'] = self.up_total_hold_time / self.up_positions_achieved
+        else:
+            stats['up_avg_hold'] = 0
+
+        if self.down_positions_achieved > 0:
+            stats['down_avg_hold'] = self.down_total_hold_time / self.down_positions_achieved
+        else:
+            stats['down_avg_hold'] = 0
+
+        # Performance by level
+        easy_rounds = [r for r in self.round_history if r['level'] == 'easy']
+        medium_rounds = [r for r in self.round_history if r['level'] == 'medium']
+        hard_rounds = [r for r in self.round_history if r['level'] == 'hard']
+
+        stats['easy_avg_violations'] = sum(r['total_violations'] for r in easy_rounds) / len(easy_rounds) if easy_rounds else 0
+        stats['medium_avg_violations'] = sum(r['total_violations'] for r in medium_rounds) / len(medium_rounds) if medium_rounds else 0
+        stats['hard_avg_violations'] = sum(r['total_violations'] for r in hard_rounds) / len(hard_rounds) if hard_rounds else 0
+
+        stats['easy_pass_rate'] = sum(1 for r in easy_rounds if r['passed']) / len(easy_rounds) * 100 if easy_rounds else 0
+        stats['medium_pass_rate'] = sum(1 for r in medium_rounds if r['passed']) / len(medium_rounds) * 100 if medium_rounds else 0
+        stats['hard_pass_rate'] = sum(1 for r in hard_rounds if r['passed']) / len(hard_rounds) * 100 if hard_rounds else 0
+
+        # Performance trends (thirds)
+        total_rounds = len(self.round_history)
+        if total_rounds >= 3:
+            third = total_rounds // 3
+            early = self.round_history[:third]
+            mid = self.round_history[third:third*2]
+            late = self.round_history[third*2:]
+
+            stats['early_avg_violations'] = sum(r['total_violations'] for r in early) / len(early) if early else 0
+            stats['mid_avg_violations'] = sum(r['total_violations'] for r in mid) / len(mid) if mid else 0
+            stats['late_avg_violations'] = sum(r['total_violations'] for r in late) / len(late) if late else 0
+
+            # Improvement calculation
+            if stats['early_avg_violations'] > 0:
+                stats['improvement_rate'] = ((stats['early_avg_violations'] - stats['late_avg_violations']) / stats['early_avg_violations'] * 100)
+            else:
+                stats['improvement_rate'] = 0
+        else:
+            stats['early_avg_violations'] = 0
+            stats['mid_avg_violations'] = 0
+            stats['late_avg_violations'] = 0
+            stats['improvement_rate'] = 0
+
+        return stats
+
+    def debug_statistics(self):
+        """Print current statistics - FOR TESTING ONLY"""
+        print("\n" + "=" * 60)
+        print("DEBUG STATISTICS")
+        print("=" * 60)
+        print(f"UP Commands: {self.up_positions_commanded}, Achieved: {self.up_positions_achieved}")
+        print(f"DOWN Commands: {self.down_positions_commanded}, Achieved: {self.down_positions_achieved}")
+        print(f"UP Violations: {self.up_violations_count} (T:{self.up_transition_violations}, H:{self.up_hold_violations})")
+        print(f"DOWN Violations: {self.down_violations_count} (T:{self.down_transition_violations}, H:{self.down_hold_violations})")
+        print(f"UP Hold Time: {self.up_total_hold_time:.1f}s")
+        print(f"DOWN Hold Time: {self.down_total_hold_time:.1f}s")
+        print(f"Shock Count: {self.total_shock_count}")
+        print(f"Round History: {len(self.round_history)} rounds")
+        print("=" * 60 + "\n")
+
+    def generate_session_performance_report(self):
+        """Generate comprehensive session performance report"""
+        if not self.session_start or not self.session_end:
+            logger.warning("Cannot generate session report - missing timestamps")
+            return
+
+        try:
+            stats = self.calculate_statistics()
+
+            timestamp = self.session_start.strftime("%Y%m%d_%H%M%S")
+            report_file = f"session_performance_{timestamp}.txt"
+
+            with open(report_file, 'w') as f:
+                # Header
+                f.write("=" * 80 + "\n")
+                f.write("SESSION PERFORMANCE SUMMARY\n")
+                f.write("=" * 80 + "\n")
+                f.write(f"Session Date: {self.session_start.strftime('%B %d, %Y')}\n")
+                f.write(f"Start Time: {self.session_start.strftime('%H:%M:%S')}\n")
+                f.write(f"End Time: {self.session_end.strftime('%H:%M:%S')}\n")
+
+                total_duration = (self.session_end - self.session_start).total_seconds()
+                hours = int(total_duration // 3600)
+                minutes = int((total_duration % 3600) // 60)
+                seconds = int(total_duration % 60)
+                f.write(f"Total Duration: {hours}h {minutes}m {seconds}s\n")
+
+                # Status
+                if self.remaining_training_time <= 0:
+                    f.write("Status: GOAL ACHIEVED\n")
+                elif self.is_deadline_reached():
+                    f.write("Status: TIME EXPIRED\n")
+                else:
+                    f.write("Status: TERMINATED\n")
+                f.write("\n")
+
+                # Training Goals
+                f.write("TRAINING GOALS\n")
+                f.write("-" * 80 + "\n")
+                f.write(f"Training Goal: {self.training_goal / 60:.1f} minutes\n")
+                f.write(f"Time Completed: {self.completed_training_time / 60:.1f} minutes\n")
+                f.write(f"Penalties Added: {self.penalty_time_added / 60:.1f} minutes\n")
+                # Calculate bonuses (estimate based on completed vs goal+penalties)
+                total_goal = self.training_goal + self.penalty_time_added
+                if self.completed_training_time > total_goal:
+                    bonuses = self.completed_training_time - total_goal
+                    f.write(f"Bonuses Earned: {bonuses / 60:.1f} minutes\n")
+                f.write("\n")
+
+                # Position Statistics
+                f.write("POSITION STATISTICS\n")
+                f.write("-" * 80 + "\n")
+                f.write("UP Position:\n")
+                f.write(f"  Commands: {self.up_positions_commanded}\n")
+                f.write(f"  Achieved: {self.up_positions_achieved} ({stats['up_success_rate']:.1f}%)\n")
+                f.write(f"  Failed to Achieve: {self.up_positions_commanded - self.up_positions_achieved} ({100 - stats['up_success_rate']:.1f}%)\n")
+                f.write(f"  Total Hold Time: {int(self.up_total_hold_time // 60)}m {int(self.up_total_hold_time % 60)}s\n")
+                f.write(f"  Average Hold: {stats['up_avg_hold']:.1f}s\n")
+                f.write(f"  Violations During Hold: {self.up_hold_violations}\n")
+                f.write(f"  Average Hold Before Violation: {stats['up_hold_before_violation_avg']:.1f}s\n")
+                f.write("\n")
+
+                f.write("DOWN Position:\n")
+                f.write(f"  Commands: {self.down_positions_commanded}\n")
+                f.write(f"  Achieved: {self.down_positions_achieved} ({stats['down_success_rate']:.1f}%)\n")
+                f.write(f"  Failed to Achieve: {self.down_positions_commanded - self.down_positions_achieved} ({100 - stats['down_success_rate']:.1f}%)\n")
+                f.write(f"  Total Hold Time: {int(self.down_total_hold_time // 60)}m {int(self.down_total_hold_time % 60)}s\n")
+                f.write(f"  Average Hold: {stats['down_avg_hold']:.1f}s\n")
+                f.write(f"  Violations During Hold: {self.down_hold_violations}\n")
+                f.write(f"  Average Hold Before Violation: {stats['down_hold_before_violation_avg']:.1f}s\n")
+                f.write("\n")
+
+                # Violation Analysis
+                total_violations = self.up_violations_count + self.down_violations_count
+                f.write("VIOLATION ANALYSIS\n")
+                f.write("-" * 80 + "\n")
+                f.write(f"Total Violations: {total_violations}\n")
+                transition_total = self.up_transition_violations + self.down_transition_violations
+                hold_total = self.up_hold_violations + self.down_hold_violations
+                f.write(f"  Transition Violations: {transition_total} ({transition_total/total_violations*100:.1f}%)\n" if total_violations > 0 else "  Transition Violations: 0\n")
+                f.write(f"    Up: {self.up_transition_violations}\n")
+                f.write(f"    Down: {self.down_transition_violations}\n")
+                f.write(f"  Hold Violations: {hold_total} ({hold_total/total_violations*100:.1f}%)\n" if total_violations > 0 else "  Hold Violations: 0\n")
+                f.write(f"    Up: {self.up_hold_violations}\n")
+                f.write(f"    Down: {self.down_hold_violations}\n")
+                f.write("\n")
+
+                # Correction Times
+                f.write("Correction Times (Hold Violations):\n")
+                f.write("  Up Position:\n")
+                f.write(f"    Fastest: {stats['up_correction_fastest']:.1f}s\n")
+                f.write(f"    Slowest: {stats['up_correction_slowest']:.1f}s\n")
+                f.write(f"    Average: {stats['up_correction_average']:.1f}s\n")
+                f.write(f"    Median: {stats['up_correction_median']:.1f}s\n")
+                f.write("  Down Position:\n")
+                f.write(f"    Fastest: {stats['down_correction_fastest']:.1f}s\n")
+                f.write(f"    Slowest: {stats['down_correction_slowest']:.1f}s\n")
+                f.write(f"    Average: {stats['down_correction_average']:.1f}s\n")
+                f.write(f"    Median: {stats['down_correction_median']:.1f}s\n")
+                f.write("\n")
+
+                # Punishment Statistics
+                f.write("PUNISHMENT STATISTICS\n")
+                f.write("-" * 80 + "\n")
+                f.write(f"Total Shocks Delivered: {self.total_shock_count}\n")
+                void_count = len([r for r in self.round_history if not r.get('passed', True) and r.get('total_violations', 0) >= MAX_PISHOCK_CYCLES])
+                f.write(f"Void Rounds: {void_count}\n")
+                f.write(f"Total Void Time: {int(self.total_void_time // 60)}m {int(self.total_void_time % 60)}s\n")
+                f.write("\n")
+
+                # Round Summary
+                f.write("ROUND SUMMARY\n")
+                f.write("-" * 80 + "\n")
+                f.write(f"Total Rounds: {len(self.round_history)}\n")
+                easy_count = len([r for r in self.round_history if r['level'] == 'easy'])
+                medium_count = len([r for r in self.round_history if r['level'] == 'medium'])
+                hard_count = len([r for r in self.round_history if r['level'] == 'hard'])
+                f.write(f"  Easy: {easy_count} (Avg violations: {stats['easy_avg_violations']:.1f})\n")
+                f.write(f"  Medium: {medium_count} (Avg violations: {stats['medium_avg_violations']:.1f})\n")
+                f.write(f"  Hard: {hard_count} (Avg violations: {stats['hard_avg_violations']:.1f})\n")
+                f.write("\n")
+
+                # Calculate cycles
+                cycles_completed = hard_count
+                f.write(f"Cycles Completed: {cycles_completed}\n")
+                f.write("\n")
+
+                # Break Analysis
+                f.write("BREAK ANALYSIS\n")
+                f.write("-" * 80 + "\n")
+                f.write(f"Total Break Time: {int(self.total_break_time // 60)}m {int(self.total_break_time % 60)}s\n")
+                f.write(f"Total Extension Time: {int(self.total_extension_time_actual // 60)}m {int(self.total_extension_time_actual % 60)}s\n")
+                f.write(f"Extension Requests: {self.total_extension_requests}\n")
+                f.write("\n")
+
+                # Time Distribution
+                f.write("TIME DISTRIBUTION\n")
+                f.write("-" * 80 + "\n")
+                active_time = self.completed_training_time
+                f.write(f"Active Training: {int(active_time // 3600)}h {int((active_time % 3600) // 60)}m ({active_time/total_duration*100:.1f}%)\n")
+                f.write(f"Breaks: {int(self.total_break_time // 60)}m ({self.total_break_time/total_duration*100:.1f}%)\n")
+                f.write(f"Extensions: {int(self.total_extension_time_actual // 60)}m ({self.total_extension_time_actual/total_duration*100:.1f}%)\n")
+                f.write(f"Void Punishment: {int(self.total_void_time // 60)}m ({self.total_void_time/total_duration*100:.1f}%)\n")
+                f.write("\n")
+
+                # Performance Trends
+                if len(self.round_history) >= 3:
+                    f.write("PERFORMANCE TRENDS\n")
+                    f.write("-" * 80 + "\n")
+                    third = len(self.round_history) // 3
+                    f.write(f"Early Performance (Rounds 1-{third}):\n")
+                    f.write(f"  Avg Violations: {stats['early_avg_violations']:.1f}/round\n")
+                    f.write("\n")
+                    f.write(f"Mid Performance (Rounds {third+1}-{third*2}):\n")
+                    f.write(f"  Avg Violations: {stats['mid_avg_violations']:.1f}/round\n")
+                    f.write("\n")
+                    f.write(f"Late Performance (Rounds {third*2+1}-{len(self.round_history)}):\n")
+                    f.write(f"  Avg Violations: {stats['late_avg_violations']:.1f}/round\n")
+                    f.write("\n")
+                    f.write(f"Improvement Rate: {stats['improvement_rate']:+.1f}%\n")
+                    f.write("\n")
+
+                # Level-Specific Performance
+                f.write("LEVEL-SPECIFIC PERFORMANCE\n")
+                f.write("-" * 80 + "\n")
+
+                for level_name, level_rounds in [('EASY', [r for r in self.round_history if r['level'] == 'easy']),
+                                                  ('MEDIUM', [r for r in self.round_history if r['level'] == 'medium']),
+                                                  ('HARD', [r for r in self.round_history if r['level'] == 'hard'])]:
+                    if level_rounds:
+                        f.write(f"{level_name} Level ({len(level_rounds)} rounds):\n")
+                        for r in level_rounds:
+                            status = "PASSED" if r['passed'] else ("VOID" if r['total_violations'] >= MAX_PISHOCK_CYCLES else "FAILED")
+                            f.write(f"  Round {r['round_number']}: {r['total_violations']} violations ({status})\n")
+                        avg = sum(r['total_violations'] for r in level_rounds) / len(level_rounds)
+                        f.write(f"  Average: {avg:.1f} violations\n")
+                        f.write("\n")
+
+                f.write("=" * 80 + "\n")
+                f.write("END OF SESSION REPORT\n")
+                f.write("=" * 80 + "\n")
+
+            logger.info(f"✓ Session performance report generated: {report_file}")
+
+        except Exception as e:
+            logger.error(f"✗ Failed to generate session performance report: {e}", exc_info=True)
 
     # ========================================================================
     # SENSOR MANAGEMENT WITH CONTINUOUS RECONNECTION
@@ -291,7 +598,7 @@ class UpDownGame:
                 # Use saved level (level that was actually played)
                 played_level = getattr(self, '_last_round_level', self.current_level)
                 f.write(f"Level: {played_level.upper()}\n")
-                f.write(f"Violation Limit: {self.current_round_violation_limit}\n")  # ← ADD THIS
+                f.write(f"Violation Limit: {self.current_round_violation_limit}\n")
                 f.write(
                     f"Duration: {self.current_round_duration} seconds ({self.current_round_duration / 60:.1f} minutes)\n")
                 f.write(f"Pose Changes: {self.pose_changes_this_round}\n")
@@ -332,6 +639,26 @@ class UpDownGame:
                 # Log break information if available
                 if self.last_break_start_time and self.last_break_end_time:
                     self._log_break_to_report(f)
+
+            # ============ NEW: Capture round history for analytics ============
+            round_data = {
+                'round_number': self.round_number,
+                'level': self._last_round_level,
+                'passed': passed,
+                'duration': self.current_round_duration,
+                'violation_limit': self.current_round_violation_limit,
+                'total_violations': len(self.violations_this_round),
+                'transition_violations': len([v for v in self.violations_this_round if v['type'] == 'transition']),
+                'hold_violations': len([v for v in self.violations_this_round if v['type'] == 'hold']),
+                'up_violations': len([v for v in self.violations_this_round if v.get('position') == 'up']),
+                'down_violations': len([v for v in self.violations_this_round if v.get('position') == 'down']),
+                'pose_changes': self.pose_changes_this_round,
+                'peak_consecutive': self.peak_consecutive_violations,
+                'timestamp': datetime.now()
+            }
+            self.round_history.append(round_data)
+            # ============ END NEW ============
+
             logger.debug(f"Round {self.round_number} logged to report")
         except Exception as e:
             logger.error(f"Failed to log round to report: {e}")
@@ -475,7 +802,7 @@ class UpDownGame:
             self.both_sensors_lost = True
             self.sensor_loss_start = time.time()
             logger.error("⚠ BOTH SENSORS LOST - Starting 2-hour patience timer")
-            play_sensor_issue()  # CHANGED: Use new function
+            play_sensor_issue()
             return True
 
         elif not both_lost and self.both_sensors_lost:
@@ -484,10 +811,11 @@ class UpDownGame:
             self.both_sensors_lost = False
             self.sensor_loss_start = None
             logger.info(f"✓ Sensors reconnected after {elapsed / 60:.1f} minutes")
-            play_sensor_issue_resolved()  # CHANGED: Use new function
+            play_sensor_issue_resolved()
             return False
 
         return both_lost
+
     def check_position_correct(self, target_position: str) -> bool:
         """Check if current angle matches target position"""
         angle = self.get_board_angle()
@@ -514,7 +842,7 @@ class UpDownGame:
         await all_bulbs_off()
 
         # Audio feedback
-        play_sensor_issue()  # CHANGED: Use new function
+        play_sensor_issue()
 
         # Start white noise (like break)
         start_white_noise()
@@ -559,7 +887,7 @@ class UpDownGame:
 
         logger.info("✓ Sensors reconnected - resuming game")
         stop_white_noise()
-        play_sensor_issue_resolved()  # ADD THIS
+        play_sensor_issue_resolved()
 
         # Go to preparation phase (fresh start)
         await self.enter_preparation()
@@ -577,10 +905,6 @@ class UpDownGame:
         else:
             self.up_positions_commanded += 1
         # ============ END NEW ============
-
-        logger.info("=" * 60)
-        logger.info(f"COMMAND: {position.upper()} {'(RAPID)' if is_rapid else ''}")
-        # ... rest of existing code
 
         logger.info("=" * 60)
         logger.info(f"COMMAND: {position.upper()} {'(RAPID)' if is_rapid else ''}")
@@ -678,6 +1002,7 @@ class UpDownGame:
                 shock_count += 1
                 logger.warning(f"⚠️ Void break punishment shock #{shock_count}")
                 asyncio.create_task(send_pishock(mode=PISHOCK_MODE_SHOCK))
+                self.total_shock_count += 1  # ← TRACK SHOCK
                 await asyncio.sleep(0)
                 self.last_void_shock_times.append(datetime.now())
                 self.last_void_shock_count = shock_count
@@ -708,6 +1033,11 @@ class UpDownGame:
         stop_white_noise()
 
         logger.info(f"Void break complete - {shock_count} punishment shocks administered")
+
+        # ============ NEW: Track void time ============
+        self.total_void_time += VOID_BREAK_DURATION
+        # ============ END NEW ============
+
         self.last_break_end_time = datetime.now()
         logger.info("Resuming training")
 
@@ -728,8 +1058,8 @@ class UpDownGame:
         logger.debug("Cycle reset due to void")
         # Resume to preparation
         await self.enter_preparation()
-    async def monitor_position_achievement(self, position: str, bulb_control, is_rapid: bool, transition_time: float = 7.0):
 
+    async def monitor_position_achievement(self, position: str, bulb_control, is_rapid: bool, transition_time: float = 7.0):
         """
         Monitor for position achievement and handle bulb behavior
         NOW ALSO: Track violations and play audio appropriately
@@ -737,7 +1067,7 @@ class UpDownGame:
         start_time = time.time()
         violation_triggered = False
 
-        # Reset violation tracking for new pose (NEW)
+        # Reset violation tracking for new pose
         self.violation_announced_this_pose = False
         self.current_pose_violations = 0
 
@@ -747,6 +1077,7 @@ class UpDownGame:
             # Check if position achieved
             if not self.position_achieved and self.check_position_correct(position):
                 self.position_achieved = True
+                logger.info(f"Position {position.upper()} achieved at {elapsed:.1f}s")
 
                 # ============ NEW: Track achievement ============
                 if position == 'down':
@@ -755,10 +1086,8 @@ class UpDownGame:
                     self.up_positions_achieved += 1
                 # ============ END NEW ============
 
-                logger.info(f"Position {position.upper()} achieved at {elapsed:.1f}s")
-
                 # Reset consecutive violation counter (position achieved)
-                self.consecutive_violations = 0  # NEW
+                self.consecutive_violations = 0
 
                 if is_rapid:
                     # Rapid: Just blink
@@ -777,7 +1106,7 @@ class UpDownGame:
             # 7-second violation check (only for normal rounds)
             if not is_rapid and elapsed >= transition_time and not violation_triggered:
                 violation_triggered = True
-                logger.warning(f"Position {position.upper()} not achieved in 7 seconds - VIOLATION")
+                logger.warning(f"Position {position.upper()} not achieved in {transition_time:.1f} seconds - VIOLATION")
 
                 # Track violation
                 self.current_pose_violations += 1
@@ -791,7 +1120,7 @@ class UpDownGame:
                 violation_start = time.time()
                 violation_record = {
                     'type': 'transition',
-                    'position': position,  # ← ADD THIS
+                    'position': position,  # ← TRACK POSITION
                     'start_time': violation_start,
                     'correction_time': 0
                 }
@@ -804,9 +1133,11 @@ class UpDownGame:
                 else:
                     self.up_violations_count += 1
                     self.up_transition_violations += 1
+                # ============ END NEW ============
 
-                # FIXED ORDER: Shock BEFORE audio
+                # Shock BEFORE audio
                 asyncio.create_task(send_pishock(mode=PISHOCK_MODE_SHOCK))
+                self.total_shock_count += 1  # ← TRACK SHOCK
                 await asyncio.sleep(0)
 
                 # Play violation audio ONLY FIRST TIME in this pose
@@ -814,14 +1145,14 @@ class UpDownGame:
                     play_violation()
                     self.violation_announced_this_pose = True
 
-                # Check for 10-in-a-row void condition
+                # Check for void condition
                 if self.consecutive_violations >= MAX_PISHOCK_CYCLES:
-                    logger.error("7 consecutive violations - VOIDING ROUND")
+                    logger.error(f"{MAX_PISHOCK_CYCLES} consecutive violations - VOIDING ROUND")
                     play_ten_in_row()
                     await self.void_round()
                     return
 
-            # Safety timeout: transition_time + 1 second
+            # Safety timeout
             safety_timeout = transition_time + 1.0
             if elapsed >= safety_timeout:
                 if not is_rapid:
@@ -829,7 +1160,7 @@ class UpDownGame:
                     logger.info(f"Bulb turned OFF (safety timeout at {safety_timeout:.1f}s)")
                 break
 
-            await asyncio.sleep(0.033)  # 30Hz check
+            await asyncio.sleep(0.033)
 
     async def signal_position_correction(self, position: str):
         """
@@ -910,40 +1241,28 @@ class UpDownGame:
             self.current_level = 'hard'
             logger.debug("Progressing to HARD")
 
-
         elif self.current_level == 'hard':
-
             # CYCLE COMPLETE
-
             logger.debug("Cycle complete!")
 
             # Award bonus only if NO failures in cycle
-
             if not self.cycle_has_failure:
-
                 self.completed_training_time += CYCLE_COMPLETION_BONUS
-
                 logger.debug(f"✓ Clean cycle! Bonus awarded: {CYCLE_COMPLETION_BONUS / 60} min")
-
             else:
-
-                # Apply penalty for failed cycle
-
+                # ============ NEW: Apply penalty for failed cycle ============
                 self.penalty_time_added += CYCLE_FAILURE_PENALTY
-
                 logger.debug(f"✗ Cycle had failure(s) - Penalty applied: {CYCLE_FAILURE_PENALTY / 60} min")
-
                 logger.debug(f"   New training goal: {self.current_training_goal / 60:.1f} min")
+                # ============ END NEW ============
 
             # Reset to Easy for new cycle
-
             self.current_level = 'easy'
 
             # Reset cycle failure tracker
-
             self.cycle_has_failure = False
-
             logger.debug("New cycle starting")
+
         # Reset round violation counter
         self.round_violations = 0
 
@@ -960,6 +1279,10 @@ class UpDownGame:
         self.start_time = datetime.now()
         self.deadline = self.start_time + timedelta(hours=GAME_DURATION_HOURS)
 
+        # ============ NEW: Track session start ============
+        self.session_start = self.start_time
+        # ============ END NEW ============
+
         logger.info("=" * 60)
         logger.info(f"GAME STARTED: {self.start_time.strftime('%H:%M:%S')}")
         logger.info(f"Deadline: {self.deadline.strftime('%H:%M:%S')}")
@@ -967,8 +1290,6 @@ class UpDownGame:
 
         # Initialize report file
         self.initialize_report()
-
-        # Note: play_second_press() already called in main.py calibration
 
         # Turn on heat, turn off fan (default state)
         await set_heat_fan_state(heat_on=True)
@@ -978,7 +1299,7 @@ class UpDownGame:
         await asyncio.sleep(VIDEO_START_BEFORE_PREP)
         logger.info("Starting initial video recording...")
         await self.video_recorder.start_recording()
-        await asyncio.sleep(3)  # Give it time to initialize
+        await asyncio.sleep(3)
 
         # Go to first preparation phase
         await self.enter_preparation()
@@ -1031,7 +1352,7 @@ class UpDownGame:
                 if self.extension_qualified:
                     logger.info("Button 1 pressed during prep - Extension granted!")
                     play_extension_granted()
-                    await asyncio.sleep(3)  # Let audio finish
+                    await asyncio.sleep(3)
 
                     # Turn off strobe, start white noise for extension
                     await strobe_control("off")
@@ -1041,13 +1362,11 @@ class UpDownGame:
                     await self.start_extension()
 
                     # Run extension until it ends
-                    # end_extension() will handle everything and start the round
                     while self.extension_active and self.state == GameState.PREPARATION:
                         await self.run_extension()
                         await asyncio.sleep(0.1)
 
-                    # Extension ended - end_extension() already started the round
-                    # Just return, don't continue prep
+                    # Extension ended
                     logger.info("Extension handling complete, returning from prep")
                     return
                 else:
@@ -1122,7 +1441,7 @@ class UpDownGame:
 
         logger.info("Round starts - verifying DOWN position")
 
-        # Run round loop (it will verify DOWN first)
+        # Run round loop
         await self.run_round()
 
     async def run_round(self):
@@ -1130,15 +1449,8 @@ class UpDownGame:
         Main round loop - Phase 1: Simple version
         Alternates between positions until round time expires
         Continuously monitors position achievement and maintenance
-
-        Key mechanics:
-        - If position not achieved: shock every 5 seconds until achieved or 10 shocks
-        - If position violated after achievement: shock every 5 seconds until corrected or 10 shocks
-        - Violations don't consume round time
-        - 10 shocks = void round
         """
         # Round starts - subject should already be in DOWN position
-        # Just verify they're there without commanding
         logger.info("Round starting - verifying initial DOWN position")
 
         # Set up monitoring without command/bulb/audio
@@ -1146,7 +1458,7 @@ class UpDownGame:
         self.position_achieved = False
         self.position_start_time = 0
 
-        # Use a reasonable grace period for initial verification (10 seconds)
+        # Use a reasonable grace period for initial verification
         initial_verification_deadline = time.time() + 10.0
         self.position_transition_deadline = initial_verification_deadline
 
@@ -1165,7 +1477,6 @@ class UpDownGame:
             # Check timeout
             if time.time() >= initial_verification_deadline:
                 logger.warning("⚠️ Initial DOWN position not detected - starting violations")
-                # Don't break - let it fall through to STATE 2 shocking
                 break
 
             await asyncio.sleep(0.1)
@@ -1178,7 +1489,7 @@ class UpDownGame:
             position_hold_target = random.uniform(*config['hold_time_down'])
         logger.info(f"🎲 Initial position hold time: {position_hold_target:.1f} seconds")
 
-        # Track time spent in violations (doesn't count toward round)
+        # Track time spent in violations
         violation_time_accumulated = 0
 
         while self.state == GameState.ROUND:
@@ -1190,10 +1501,10 @@ class UpDownGame:
                 await self.handle_sensor_loss_during_round()
                 return
 
-            # Calculate adjusted round time (excluding violation time)
+            # Calculate adjusted round time
             round_elapsed = (time.time() - self.round_start_time) - violation_time_accumulated
 
-            # Check if round time expired (adjusted for violations)
+            # Check if round time expired
             if round_elapsed >= self.current_round_duration:
                 logger.info(
                     f"Round complete: {round_elapsed:.1f}s (violations added {violation_time_accumulated:.1f}s)")
@@ -1205,10 +1516,8 @@ class UpDownGame:
                 await self.end_game()
                 break
 
-            # TWO STATES: Position achieved (holding) vs Position not achieved (waiting)
-
+            # STATE 1: Position achieved (holding)
             if self.position_achieved:
-                # STATE 1: Position achieved - monitor if it's maintained
                 current_time = time.time()
                 position_held_time = current_time - self.position_start_time
                 hold_remaining = position_hold_target - position_held_time
@@ -1227,7 +1536,7 @@ class UpDownGame:
                         logger.warning(
                             f"⚠️ Position {self.current_position.upper()} lost during grace period - waiting for correction")
 
-                        # Wait for correction (no shocking during grace period)
+                        # Wait for correction
                         while not self.check_position_correct(self.current_position) and self.state == GameState.ROUND:
                             if self.check_both_sensors_lost():
                                 await self.handle_sensor_loss_during_round()
@@ -1242,20 +1551,24 @@ class UpDownGame:
 
                         # Check result
                         if self.check_position_correct(self.current_position):
-                            # Corrected within grace period!
                             logger.info(f"✓ Position corrected within grace period")
-                            self.position_start_time = time.time()  # Reset hold timer
+                            self.position_start_time = time.time()
                             await asyncio.sleep(0.1)
                             continue
-                        # else: grace period expired, fall through to punishment
 
-                    # VIOLATION AFTER GRACE PERIOD - Position not maintained!
+                    # VIOLATION AFTER GRACE PERIOD
                     violation_start_time = time.time()
+
+                    # ============ NEW: Calculate hold duration before violation ============
+                    hold_duration_before_violation = violation_start_time - self.position_start_time
+                    # ============ END NEW ============
+
                     logger.warning(
                         f"⚠️ [{violation_start_time:.3f}] Position {self.current_position.upper()} NOT MAINTAINED - VIOLATION")
 
-                    # Send shock and audio SIMULTANEOUSLY (non-blocking)
+                    # Send shock and audio SIMULTANEOUSLY
                     asyncio.create_task(send_pishock(mode=PISHOCK_MODE_SHOCK))
+                    self.total_shock_count += 1  # ← TRACK SHOCK
                     await asyncio.sleep(0)
                     play_violation()
 
@@ -1269,16 +1582,29 @@ class UpDownGame:
 
                     violation_record = {
                         'type': 'hold',
+                        'position': self.current_position,  # ← TRACK POSITION
                         'start_time': violation_start_time,
-                        'correction_time': 0
+                        'correction_time': 0,
+                        'hold_duration_before_violation': hold_duration_before_violation  # ← TRACK HOLD DURATION
                     }
                     self.violations_this_round.append(violation_record)
+
+                    # ============ NEW: Track by position ============
+                    if self.current_position == 'down':
+                        self.down_violations_count += 1
+                        self.down_hold_violations += 1
+                        self.down_hold_before_violation.append(hold_duration_before_violation)
+                    else:
+                        self.up_violations_count += 1
+                        self.up_hold_violations += 1
+                        self.up_hold_before_violation.append(hold_duration_before_violation)
+                    # ============ END NEW ============
 
                     # Track shocks during this violation period
                     shocks_this_violation = 1
                     last_shock_time = violation_start_time
 
-                    # Keep shocking every 5 seconds until position corrected or 10 shocks
+                    # Keep shocking every 5 seconds until position corrected
                     while not self.check_position_correct(self.current_position) and self.state == GameState.ROUND:
                         if self.check_both_sensors_lost():
                             await self.handle_sensor_loss_during_round()
@@ -1298,13 +1624,14 @@ class UpDownGame:
 
                             logger.warning(f"⚠️ Position still not maintained - Shock #{shocks_this_violation}")
                             asyncio.create_task(send_pishock(mode=PISHOCK_MODE_SHOCK))
+                            self.total_shock_count += 1  # ← TRACK SHOCK
                             await asyncio.sleep(0)
 
                             last_shock_time = current_time
 
-                            # Check for 10-shock void condition
+                            # Check for void condition
                             if shocks_this_violation >= MAX_PISHOCK_CYCLES:
-                                logger.error(f"10 shocks delivered without correction - VOIDING ROUND")
+                                logger.error(f"{MAX_PISHOCK_CYCLES} shocks delivered without correction - VOIDING ROUND")
                                 play_ten_in_row()
                                 await self.void_round()
                                 return
@@ -1317,10 +1644,17 @@ class UpDownGame:
                     violation_time_accumulated += violation_duration
                     violation_record['correction_time'] = violation_duration
 
+                    # ============ NEW: Track correction time by position ============
+                    if self.current_position == 'down':
+                        self.down_correction_times.append(violation_duration)
+                    else:
+                        self.up_correction_times.append(violation_duration)
+                    # ============ END NEW ============
+
                     # Reset timer for this position
                     self.position_achieved = True
                     self.position_start_time = time.time()
-                    self.consecutive_violations = 0  # Reset on success
+                    self.consecutive_violations = 0
 
                     logger.info(
                         f"✓ [{self.position_start_time:.3f}] Position {self.current_position.upper()} re-achieved")
@@ -1333,6 +1667,13 @@ class UpDownGame:
 
                 # Check if hold time complete
                 if position_held_time >= position_hold_target:
+                    # ============ NEW: Track successful hold time ============
+                    if self.current_position == 'down':
+                        self.down_total_hold_time += position_held_time
+                    else:
+                        self.up_total_hold_time += position_held_time
+                    # ============ END NEW ============
+
                     # Hold complete - switch position
                     logger.info(
                         f"⏱️ [{current_time:.3f}] Hold complete! Held for {position_held_time:.1f}s (target: {position_hold_target:.1f}s)")
@@ -1348,8 +1689,7 @@ class UpDownGame:
                     # Reset countdown tracker
                     self.last_countdown_second = int(time.time())
 
-                    # Wait for position to be achieved (monitor task sets this)
-                    # BUT don't wait forever - timeout after transition deadline + 2 seconds
+                    # Wait for position to be achieved
                     wait_timeout = self.position_transition_deadline + 2.0
 
                     while not self.position_achieved and self.state == GameState.ROUND:
@@ -1362,7 +1702,7 @@ class UpDownGame:
                         current_time = time.time()
                         if current_time >= wait_timeout:
                             logger.warning(f"⚠️ Position {self.current_position.upper()} wait timeout - exiting loop")
-                            break  # Exit loop, position not achieved
+                            break
 
                         # Countdown logging
                         remaining = self.position_transition_deadline - current_time
@@ -1376,7 +1716,7 @@ class UpDownGame:
 
                     # Check if position was actually achieved
                     if self.position_achieved:
-                        # Position achieved - EXPLICIT timer reset
+                        # Position achieved - reset timer
                         self.position_start_time = time.time()
                         achievement_time = self.position_start_time
 
@@ -1390,132 +1730,92 @@ class UpDownGame:
                         logger.info(f"⏱️ [{achievement_time:.3f}] {self.current_position.upper()} achieved!")
                         logger.info(f"🎲 New position hold time: {position_hold_target:.1f} seconds")
 
-                        # Reset consecutive shock tracking (position achieved successfully)
+                        # Reset consecutive shock tracking
                         self.consecutive_violations = 0
 
-                        # Continue to next iteration to start monitoring hold
                         continue
                     else:
                         # Position NOT achieved after timeout
-                        # Fall through to next iteration - STATE 2 will handle continuous shocking
                         logger.warning(
                             f"⚠️ Position {self.current_position.upper()} not achieved - entering continuous shocking mode")
-                        # Don't continue, don't generate hold time - just let next iteration handle it
-
 
             else:
-
-                # STATE 2: Position not yet achieved - waiting and shocking if taking too long
-
+                # STATE 2: Position not yet achieved
                 current_time = time.time()
-
                 time_waiting = current_time - self.position_command_start
 
                 # Check if position is now achieved
-
                 if self.check_position_correct(self.current_position):
-
-                    # Position achieved! Set flag and reset timer
-
+                    # Position achieved
                     self.position_achieved = True
-
                     self.position_start_time = time.time()
-
-                    self.consecutive_violations = 0  # Reset on success
+                    self.consecutive_violations = 0
 
                     # Update transition violation correction time if exists
-
                     if self.violations_this_round:
-
                         last_violation = self.violations_this_round[-1]
-
                         if last_violation['type'] == 'transition' and last_violation['correction_time'] == 0:
                             correction_time = time.time() - last_violation['start_time']
-
                             last_violation['correction_time'] = correction_time
 
+                            # ============ NEW: Track correction time by position ============
+                            if last_violation.get('position') == 'down':
+                                self.down_correction_times.append(correction_time)
+                            else:
+                                self.up_correction_times.append(correction_time)
+                            # ============ END NEW ============
+
                     # Clear continuous shock tracking
-
                     self._continuous_shock_start = None
-
                     self._continuous_shock_count = None
-
                     self._last_continuous_shock = None
 
                     logger.info(f"✓ STATE 2: Position {self.current_position.upper()} achieved")
-
                     logger.info(f"   Exiting continuous shocking mode")
 
-                    # Now position_achieved = True, next iteration goes to STATE 1
-
                     await asyncio.sleep(0.1)
-
                     continue
 
                 # Position still not achieved - check if we need to shock
-
-                # Initial transition-time violation is handled by monitor_position_achievement()
-
-                # But we need to CONTINUE shocking every 5 seconds after that
-
                 if time_waiting > self.position_transition_deadline - self.position_command_start:
-
                     # Beyond initial violation time - need continuous shocking
-
-                    # Check when we last shocked (use None check, not hasattr)
 
                     if self._continuous_shock_start is None:
                         # First time entering continuous shock mode
-
                         self._continuous_shock_start = current_time
-
-                        self._continuous_shock_count = 1  # monitor_position_achievement already sent first shock
-
-                        self._last_continuous_shock = current_time - 2  # Allow next shock in 3 seconds
+                        self._continuous_shock_count = 1
+                        self._last_continuous_shock = current_time - 2
 
                     time_since_last_shock = current_time - self._last_continuous_shock
 
                     if time_since_last_shock >= 5.0:
-
                         self._continuous_shock_count += 1
-
                         self.consecutive_violations += 1
 
                         # Update peak
-
                         if self.consecutive_violations > self.peak_consecutive_violations:
                             self.peak_consecutive_violations = self.consecutive_violations
 
                         logger.warning(
-
                             f"⚠️ Position {self.current_position.upper()} still not achieved - Continuous shock #{self._continuous_shock_count}")
 
                         asyncio.create_task(send_pishock(mode=PISHOCK_MODE_SHOCK))
+                        self.total_shock_count += 1  # ← TRACK SHOCK
                         await asyncio.sleep(0)
 
                         self._last_continuous_shock = current_time
 
-                        # Check for 10-shock void condition
-
+                        # Check for void condition
                         if self._continuous_shock_count >= MAX_PISHOCK_CYCLES:
-                            logger.error(f"10 shocks delivered, position never achieved - VOIDING ROUND")
-
+                            logger.error(f"{MAX_PISHOCK_CYCLES} shocks delivered, position never achieved - VOIDING ROUND")
                             play_ten_in_row()
-
                             await self.void_round()
-
                             return
 
                 else:
-
                     # Still within initial transition window
-
-                    # Reset continuous shock tracking
-
                     self._continuous_shock_start = None
-
                     self._continuous_shock_count = None
-
                     self._last_continuous_shock = None
 
             await asyncio.sleep(0.1)
@@ -1539,7 +1839,7 @@ class UpDownGame:
         self.apply_round_result(passed)
 
         # Log round to report file
-        self.log_round_to_report(passed)  # ← ADD THIS
+        self.log_round_to_report(passed)
 
         logger.info(f"Completed training: {self.completed_training_time / 60:.1f} minutes")
         logger.info(f"Remaining: {self.remaining_training_time / 60:.1f} minutes")
@@ -1564,6 +1864,10 @@ class UpDownGame:
         self.last_break_extension_duration = 0
         self.last_break_extension_fan_time = None
 
+        # ============ NEW: Track break start ============
+        self._current_break_start_absolute = time.time()
+        # ============ END NEW ============
+
         # Play round over audio and get duration
         round_over_duration = play_round_over()
 
@@ -1572,6 +1876,7 @@ class UpDownGame:
         await heat_control("off")
         self.heat_on = False
         logger.info("→ Mode: HEAT OFF / FAN OFF (regular break)")
+
         # Wait for round_over audio to finish before playing status
         if round_over_duration > 0:
             await asyncio.sleep(round_over_duration + 0.3)
@@ -1592,12 +1897,7 @@ class UpDownGame:
     async def run_break(self):
         """
         Run break period
-        Subject can request extension via Button 1:
-        - 50% chance of approval (if time remains)
-        - Extension has no fixed duration (subject ends it)
-        - Total pool: 5 hours
-        - Fan activates after 15-25 min of extension
-        - Subject ends extension by pressing any button
+        Subject can request extension via Button 1
         """
         # Initialize button state for this break
         initial_button_1 = await read_button(BUTTON_1)
@@ -1614,8 +1914,6 @@ class UpDownGame:
 
                 # Check if extension ended and state changed
                 if not self.extension_active and self.state != GameState.BREAK:
-                    # Extension called end_extension() which changed state to PREPARATION
-                    # end_extension() already called enter_preparation()
                     logger.info("Extension ended, exiting break loop")
                     return
 
@@ -1657,12 +1955,7 @@ class UpDownGame:
             await asyncio.sleep(0.1)
 
     async def process_extension_request(self):
-        """
-        Process extension request from Button 1
-        - Check if qualified (after Hard round)
-        - Check if time remaining in pool
-        - Always grant if both conditions met (no 50% chance)
-        """
+        """Process extension request from Button 1"""
         logger.info("=" * 60)
         logger.info("EXTENSION REQUEST")
         logger.info("=" * 60)
@@ -1673,7 +1966,6 @@ class UpDownGame:
         # CHECK 1: Is subject qualified?
         if not self.extension_qualified:
             logger.debug("Extension request - Not qualified (silent)")
-            # SILENT - no response to subject
             return
 
         # CHECK 2: Is there time remaining in pool?
@@ -1694,14 +1986,8 @@ class UpDownGame:
         # Start extension
         await self.start_extension()
 
-
     async def start_extension(self):
-        """
-        Start break extension
-        - Open-ended duration (subject decides when to end)
-        - Fan activates after 15-25 minutes
-        - Subject ends by pressing any button
-        """
+        """Start break extension"""
         logger.info("=" * 60)
         logger.info("EXTENSION STARTED")
         logger.info("=" * 60)
@@ -1711,7 +1997,7 @@ class UpDownGame:
         self.extension_start_time = time.time()
         self.extension_fan_triggered = False
 
-        # Randomize fan trigger time (15-25 minutes)
+        # Randomize fan trigger time
         self.extension_fan_trigger_time = self.extension_start_time + random.randint(
             EXTENSION_FAN_ACTIVATION_MIN,
             EXTENSION_FAN_ACTIVATION_MAX
@@ -1724,13 +2010,7 @@ class UpDownGame:
         self._last_button_2_value = await read_button(BUTTON_2)
 
     async def run_extension(self):
-        """
-        Run extension period
-        - Monitor time for fan activation (15-25 min)
-        - Turn heat OFF / fan ON after timeout
-        - Check for 4-hour timeout
-        - Wait for button press to end
-        """
+        """Run extension period"""
         current_time = time.time()
         extension_elapsed = current_time - self.extension_start_time
 
@@ -1740,10 +2020,10 @@ class UpDownGame:
             await self.end_extension(reason="timeout")
             return
 
-        # Check if fan activation time reached (heat off / fan on)
+        # Check if fan activation time reached
         if not self.extension_fan_triggered and current_time >= self.extension_fan_trigger_time:
             logger.info("⚠️  Extension fan activation time - HEAT OFF / FAN ON")
-            await set_heat_fan_state(heat_on=False)  # ← CHANGED
+            await set_heat_fan_state(heat_on=False)
             self.heat_on = False
             self.extension_fan_triggered = True
 
@@ -1777,17 +2057,13 @@ class UpDownGame:
         await asyncio.sleep(0.1)
 
     async def end_extension(self, reason: str = "button"):
-        """
-        End extension period
-        - Track time used
-        - Restore heat/fan state
-        - Play appropriate audio AND WAIT
-        - Go directly to round start (no prep phase)
-
-        Args:
-            reason: "button" (user ended) or "timeout" (4 hour limit)
-        """
+        """End extension period"""
         extension_duration = time.time() - self.extension_start_time
+
+        # ============ NEW: Track actual extension time ============
+        self.total_extension_time_actual += extension_duration
+        # ============ END NEW ============
+
         # Track for report
         self.last_break_extension_duration = extension_duration
         if self.extension_fan_triggered:
@@ -1827,7 +2103,7 @@ class UpDownGame:
         self.extension_active = False
         self.extension_fan_triggered = False
 
-        # Extension complete - proceed directly to round (NO prep phase)
+        # Extension complete - proceed directly to round
         logger.info("Extension complete - starting round immediately")
 
         # Stop white noise
@@ -1844,39 +2120,27 @@ class UpDownGame:
 
         # Go DIRECTLY to round - skip prep entirely
         await self.start_round()
+
     def check_rapid_eligibility(self) -> bool:
-        """
-        Check if subject is eligible for rapid training (Phase 7)
-        Requirements:
-        - At least 3 consecutive clean rounds
-        - No extension requests used
-
-        Note: This is for Phase 7 implementation
-        """
-        # Phase 1: Not implemented yet, always return False
+        """Check if subject is eligible for rapid training (Phase 7)"""
         return False
-
-        # Phase 7 implementation (uncomment when ready):
-        # if self.consecutive_clean_rounds < 3:
-        #     return False
-        #
-        # # Any extension request disqualifies
-        # if self.total_extension_requests > 0:
-        #     logger.debug(f"Rapid ineligible: {self.total_extension_requests} extension requests")
-        #     return False
-        #
-        # return True
 
     async def end_break(self):
         """End break period"""
         logger.info("Break ending...")
         self.last_break_end_time = datetime.now()
 
+        # ============ NEW: Track break duration ============
+        if hasattr(self, '_current_break_start_absolute'):
+            break_duration = time.time() - self._current_break_start_absolute
+            self.total_break_time += break_duration
+        # ============ END NEW ============
+
         # Start video recording FIRST
         logger.info("Starting video recording...")
         await self.video_recorder.start_recording()
 
-        # Give video a moment to initialize (3 seconds)
+        # Give video a moment to initialize
         await asyncio.sleep(3)
 
         # Stop white noise
@@ -1894,6 +2158,10 @@ class UpDownGame:
         self.state = GameState.FINISHED
         self.is_running = False
 
+        # ============ NEW: Track session end ============
+        self.session_end = datetime.now()
+        # ============ END NEW ============
+
         logger.info("=" * 60)
         logger.info("GAME ENDED")
         logger.info(f"Training completed: {self.completed_training_time / 60:.1f} minutes")
@@ -1907,10 +2175,14 @@ class UpDownGame:
             logger.info("STATUS: TERMINATED")
         logger.info("=" * 60)
 
-        # Play end audio
-        play_training_ended()
+        # ============ NEW: Generate session report ============
+        logger.info("Generating session performance report...")
+        self.generate_session_performance_report()
+        # ============ END NEW ============
 
-        # Start game end sequence (plug + all lights on forever)
+
+
+        # Start game end sequence
         asyncio.create_task(game_end_sequence())
 
     # ========================================================================
@@ -1938,7 +2210,6 @@ class UpDownGame:
                 return
 
             # Game is running - state machine handles the rest
-            # (update loops are in each state's run method)
 
         except Exception as e:
             logger.critical(f"Critical error in game update: {e}", exc_info=True)
