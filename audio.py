@@ -430,3 +430,47 @@ def play_intro_audio() -> float:
     except Exception as e:
         logger.error(f"[AUDIO] Failed to play intro: {e}")
         return 0.0
+
+
+def play_audio_from_folder(folder_path: str, description: str = "") -> float:
+    """
+    Play random audio file from a custom folder
+
+    Args:
+        folder_path: Path to folder containing audio files (e.g., 'audio_holding/holding_intro')
+        description: Description for logging
+
+    Returns:
+        Duration of audio in seconds
+    """
+    try:
+        # Check if folder exists
+        if not os.path.exists(folder_path):
+            logger.warning(f"Audio folder not found: {folder_path}")
+            return 0.0
+
+        # Get all audio files in folder
+        audio_files = []
+        for ext in ['.mp3', '.wav', '.ogg']:
+            audio_files.extend(Path(folder_path).glob(f'*{ext}'))
+
+        if not audio_files:
+            logger.warning(f"No audio files found in: {folder_path}")
+            return 0.0
+
+        # Pick random file
+        audio_file = random.choice(audio_files)
+
+        logger.info(f"[AUDIO] Playing: {folder_path} -> {audio_file.name}")
+
+        # Load and play
+        sound = pygame.mixer.Sound(str(audio_file))
+        sound.set_volume(AUDIO_VOLUME)
+        sound.play()
+
+        # Return duration
+        return sound.get_length()
+
+    except Exception as e:
+        logger.error(f"Failed to play audio from {folder_path}: {e}")
+        return 0.0

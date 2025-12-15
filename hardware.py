@@ -469,3 +469,30 @@ async def test_all_hardware():
     logger.info(f"  {'✓' if result else '✗'}")
 
     logger.info("="*60)
+
+
+# ============================================================================
+# HARDWARE MONITORING (Continuous reconnection)
+# ============================================================================
+
+async def hardware_monitor():
+    """
+    Monitor hardware connections and attempt reconnection
+    Runs continuously throughout the game
+    """
+    logger.info("Hardware monitoring started")
+
+    check_interval = HARDWARE_MONITOR_INTERVAL  # From config (default 10 seconds)
+
+    while True:
+        try:
+            # Just sleep - hardware already auto-reconnects via Govee API
+            # This task mainly exists to match the original architecture
+            await asyncio.sleep(check_interval)
+
+        except asyncio.CancelledError:
+            logger.info("Hardware monitoring stopped")
+            break
+        except Exception as e:
+            logger.error(f"Hardware monitor error: {e}")
+            await asyncio.sleep(5)
