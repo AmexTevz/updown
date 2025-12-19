@@ -377,7 +377,9 @@ async def game_end_sequence():
 
     # Step 1: Turn on all bulbs AND play audio simultaneously
     try:
+        await strobe_control("on")
         await all_bulbs_on()
+
         logger.info("✓ All bulbs turned ON")
     except Exception as e:
         logger.error(f"Failed to turn on bulbs: {e}")

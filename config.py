@@ -29,7 +29,7 @@ PISHOCK_EMITTER_1 = "34C8335871E"
 # Mode 0 = shock, Mode 1 = vibrate
 PISHOCK_MODE_SHOCK = "shock"
 PISHOCK_MODE_VIBRATE = "vibrate"
-PISHOCK_INTENSITY_MIN = 60
+PISHOCK_INTENSITY_MIN = 65
 PISHOCK_INTENSITY_MAX = 100
 PISHOCK_DURATION_MIN = 1
 PISHOCK_DURATION_MAX = 2
@@ -47,8 +47,11 @@ VOID_SHOCK_INTERVAL_MAX = 30
 # ============================================================================
 GAME_DURATION_HOURS = 10
 
-TRAINING_TIME_MIN = 5 * 60
-TRAINING_TIME_MAX = 8 * 60 #------------
+TRAINING_TIME_MIN = 120 * 60
+TRAINING_TIME_MAX = 180 * 60 #------------
+
+HOLDING_TRAINING_TIME_MIN = 60 * 60
+HOLDING_TRAINING_TIME_MAX = 90 * 60
 
 ROUND_DURATION_MIN = 3 * 60
 ROUND_DURATION_MAX = 6 * 60
@@ -145,22 +148,22 @@ VIOLATION_LIMIT_MIN = 3
 VIOLATION_LIMIT_MAX = 10
 LEVEL_CONFIG = {
     'easy': {
-        'round_duration': (120, 200),      # 3-5 minutes---------
-        'transition_time': (10, 12),        # 8-12 seconds random per command
-        'hold_time_up': (3, 8),            # 3-9 seconds
-        'hold_time_down': (12, 16),         # 6-18 seconds
+        'round_duration': (180, 300),      # 3-5 minutes---------
+        'transition_time': (10, 13),        # 8-12 seconds random per command
+        'hold_time_up': (3, 6),            # 3-9 seconds
+        'hold_time_down': (10, 15),         # 6-18 seconds
     },
     'medium': {
-        'round_duration': (200, 220),      # 4-6 minutes----------
-        'transition_time': (8, 10),        # 6-10 seconds
-        'hold_time_up': (7, 12),           # 6-15 seconds
-        'hold_time_down': (8, 12),         # 5-12 seconds
+        'round_duration': (240, 360),      # 4-6 minutes----------
+        'transition_time': (7, 10),        # 6-10 seconds
+        'hold_time_up': (7, 10),           # 6-15 seconds
+        'hold_time_down': (7, 10),         # 5-12 seconds
     },
     'hard': {
-        'round_duration': (200, 220),      # 5-7 minutes-----------
-        'transition_time': (5, 8),         # 5-8 seconds
-        'hold_time_up': (11, 16),          # 10-20 seconds
-        'hold_time_down': (3, 6),         # 3-10 seconds
+        'round_duration': (300, 420),      # 5-7 minutes-----------
+        'transition_time': (4, 7),         # 5-8 seconds
+        'hold_time_up': (10, 15),          # 10-20 seconds
+        'hold_time_down': (5, 7),         # 3-10 seconds
     }
 }
 

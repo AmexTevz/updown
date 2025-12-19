@@ -207,6 +207,12 @@ class UpDownGame:
         self.total_extension_time_actual = 0.0  # Actual time in extensions
         self.total_void_time = 0.0
         self.total_shock_count = 0
+        self.cycle_has_failure = False  # Track if any failure in current cycle
+        self.extension_used_this_cycle = False  # NEW: Track if extension used this cycle
+        self.current_round_violation_limit = 0
+        self.bonus_awarded_this_round = 0
+        self.bonus_denied_reason = None
+        self.penalty_applied_this_round = 0
 
         # Break tracking helper
         self._current_break_start_absolute = 0
@@ -626,6 +632,18 @@ class UpDownGame:
                 f.write(f"\nPeak Consecutive Violations: {self.peak_consecutive_violations}\n")
                 f.write(f"\nTRAINING PROGRESS:\n")
                 f.write(f"  Time Credited This Round: {self.current_round_duration / 60:.1f} minutes\n")
+                if self.bonus_awarded_this_round > 0:
+                    f.write(f"  CYCLE BONUS AWARDED: +{self.bonus_awarded_this_round / 60:.1f} minutes ✓\n")
+                elif self.bonus_denied_reason:
+                    if self.bonus_denied_reason == "extension_used":
+                        f.write(f"  CYCLE BONUS DENIED: Extension was used (cycle was clean)\n")
+                    elif self.bonus_denied_reason == "cycle_failure":
+                        f.write(f"  CYCLE BONUS DENIED: Cycle had failure(s)\n")
+                    elif self.bonus_denied_reason == "extension_and_failure":
+                        f.write(f"  CYCLE BONUS DENIED: Extension used + cycle failure\n")
+
+                if self.penalty_applied_this_round > 0:
+                    f.write(f"  CYCLE FAILURE PENALTY: +{self.penalty_applied_this_round / 60:.1f} minutes to goal\n")
                 f.write(f"  Completed Training Time: {self.completed_training_time / 60:.1f} minutes\n")
                 f.write(f"  Training Goal: {self.current_training_goal / 60:.1f} minutes\n")
                 f.write(f"  Remaining: {self.remaining_training_time / 60:.1f} minutes\n")
@@ -1241,26 +1259,67 @@ class UpDownGame:
             self.current_level = 'hard'
             logger.debug("Progressing to HARD")
 
+
         elif self.current_level == 'hard':
+
             # CYCLE COMPLETE
+
             logger.debug("Cycle complete!")
 
-            # Award bonus only if NO failures in cycle
-            if not self.cycle_has_failure:
+            # NEW: Check both failure AND extension usage for bonus eligibility
+            logger.info(
+                f"DEBUG: cycle_has_failure={self.cycle_has_failure}, extension_used_this_cycle={self.extension_used_this_cycle}")
+
+            can_award_bonus = not self.cycle_has_failure and not self.extension_used_this_cycle
+
+            if can_award_bonus:
+
                 self.completed_training_time += CYCLE_COMPLETION_BONUS
+
                 logger.debug(f"✓ Clean cycle! Bonus awarded: {CYCLE_COMPLETION_BONUS / 60} min")
+                self.bonus_awarded_this_round = CYCLE_COMPLETION_BONUS
+                self.bonus_denied_reason = None
+
             else:
-                # ============ NEW: Apply penalty for failed cycle ============
-                self.penalty_time_added += CYCLE_FAILURE_PENALTY
-                logger.debug(f"✗ Cycle had failure(s) - Penalty applied: {CYCLE_FAILURE_PENALTY / 60} min")
-                logger.debug(f"   New training goal: {self.current_training_goal / 60:.1f} min")
-                # ============ END NEW ============
+
+                # No bonus - log reason
+
+                if self.extension_used_this_cycle and self.cycle_has_failure:
+
+                    logger.debug(f"✗ No bonus: Extension used + cycle failure")
+                    self.bonus_denied_reason = "extension_and_failure"
+
+                elif self.extension_used_this_cycle:
+
+                    logger.debug(f"✗ No bonus: Extension used (cycle was clean)")
+                    self.bonus_denied_reason = "extension_used"
+
+                else:  # cycle_has_failure
+
+                    logger.debug(f"✗ No bonus: Cycle had failure(s)")
+                    self.bonus_denied_reason = "cycle_failure"
+                self.bonus_awarded_this_round = 0
+
+                # Apply failure penalty ONLY if there was actual failure
+
+                if self.cycle_has_failure:
+                    self.penalty_time_added += CYCLE_FAILURE_PENALTY
+
+                    logger.debug(f"   Failure penalty: {CYCLE_FAILURE_PENALTY / 60} min")
+                    self.penalty_applied_this_round = CYCLE_FAILURE_PENALTY
+                    logger.debug(f"   Failure penalty: {CYCLE_FAILURE_PENALTY / 60} min")
+                    logger.debug(f"   New training goal: {self.current_training_goal / 60:.1f} min")
 
             # Reset to Easy for new cycle
+
             self.current_level = 'easy'
 
-            # Reset cycle failure tracker
+            # Reset cycle tracking
+
             self.cycle_has_failure = False
+
+            self.extension_used_this_cycle = False  # NEW: Reset for next cycle
+
             logger.debug("New cycle starting")
 
         # Reset round violation counter
@@ -1354,6 +1413,9 @@ class UpDownGame:
                     play_extension_granted()
                     await asyncio.sleep(3)
 
+                    self.extension_used_this_cycle = True
+                    logger.debug("  Next cycle bonus: INELIGIBLE (extension taken)")
+
                     # Turn off strobe, start white noise for extension
                     await strobe_control("off")
                     start_white_noise()
@@ -1413,6 +1475,9 @@ class UpDownGame:
         self.pose_changes_this_round = 0
         self.violations_this_round = []
         self.peak_consecutive_violations = 0
+        self.penalty_applied_this_round = 0  # ← ADD THIS
+        self.bonus_awarded_this_round = 0  # ← ADD THIS
+        self.bonus_denied_reason = None
 
         self.void_occurred = False
 
@@ -1981,6 +2046,8 @@ class UpDownGame:
         # QUALIFIED AND TIME AVAILABLE - ALWAYS GRANT
         logger.info("✓ Extension GRANTED")
         logger.info(f"  Total requests: {self.total_extension_requests}")
+        self.extension_used_this_cycle = True
+        logger.debug("  Next cycle bonus: INELIGIBLE (extension taken)")
         play_extension_granted()
 
         # Start extension
@@ -2181,9 +2248,7 @@ class UpDownGame:
         # ============ END NEW ============
 
 
-
-        # Start game end sequence
-        asyncio.create_task(game_end_sequence())
+        await game_end_sequence()  # ← DO THIS INSTEAD
 
     # ========================================================================
     # MAIN UPDATE LOOP
